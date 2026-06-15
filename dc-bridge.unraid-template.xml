@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>dc-bridge</Name>
+  <Repository>dc-bridge:latest</Repository>
+  <Registry/>
+  <Network>br0</Network>
+  <MyIP>192.168.1.139</MyIP>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/Nischi85/dc-bridge</Support>
+  <Project>https://github.com/Nischi85/dc-bridge</Project>
+  <Overview>Custom bridge between Sonarr/Radarr, Jellyseerr, and AirDC++. Polls AirDC++ search results for active Jellyseerr requests and queues downloads (whole release folder including .rar/.sfv/.nfo/sample) into a complete-release source layout.</Overview>
+  <Category>MediaApp:Other Productivity:</Category>
+  <WebUI>http://[IP]:[PORT:8000]/state</WebUI>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled>1764380000</DateInstalled>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Description>Custom service that drives AirDC++ from Sonarr/Radarr webhooks + Jellyseerr request status. Built locally from source — see the project repo (README + Dockerfile) for setup.</Description>
+  <Networking>
+    <Mode>br0</Mode>
+    <Publish/>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/cache/appdata/dc-bridge</HostDir>
+      <ContainerDir>/config</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/cache/dc-bridge</HostDir>
+      <ContainerDir>/mnt/cache/dc-bridge</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value>/config/config.yaml</Value>
+      <Name>CONFIG_PATH</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Labels/>
+  <Config Name="WebUI / Webhook port" Target="8000" Default="8000" Mode="tcp" Description="Inbound webhook endpoint for Sonarr/Radarr and the bridge's own status/sync endpoints." Type="Port" Display="always" Required="true" Mask="false">8000</Config>
+  <Config Name="Config directory" Target="/config" Default="/mnt/cache/appdata/dc-bridge" Mode="rw" Description="Persistent config.yaml + state.db live here." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/dc-bridge</Config>
+  <Config Name="Log directory" Target="/mnt/cache/dc-bridge" Default="/mnt/cache/dc-bridge" Mode="rw" Description="Where the bridge writes its rotating log file (logging.log_file in config.yaml points here)." Type="Path" Display="always" Required="false" Mask="false">/mnt/cache/dc-bridge</Config>
+  <Config Name="CONFIG_PATH" Target="CONFIG_PATH" Default="/config/config.yaml" Mode="" Description="Where the bridge reads its config inside the container." Type="Variable" Display="always" Required="true" Mask="false">/config/config.yaml</Config>
+</Container>

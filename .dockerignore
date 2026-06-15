@@ -1,0 +1,4 @@
+state.db
+*.log
+__pycache__
+.git

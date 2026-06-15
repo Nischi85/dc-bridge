@@ -1,0 +1,8 @@
+config.yaml
+state.db
+*.log
+__pycache__/
+.venv/
+.python-version
+.idea/
+.vscode/

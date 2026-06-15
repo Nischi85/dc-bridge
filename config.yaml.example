@@ -1,0 +1,138 @@
+bridge:
+  host: 0.0.0.0
+  port: 8000
+  log_level: INFO
+
+airdcpp:
+  url: http://CHANGE.ME:54921
+  username: CHANGE_ME
+  password: CHANGE_ME
+  hub_urls: []              # empty = search all connected hubs
+
+sonarr:
+  url: http://CHANGE.ME:8989
+  api_key: "CHANGE_ME"      # Sonarr Settings -> General -> API Key
+
+radarr:
+  url: http://CHANGE.ME:7878
+  api_key: "CHANGE_ME"      # Radarr Settings -> General -> API Key
+
+# When configured, the bridge filters its worklist to only items that have an
+# active Jellyseerr request in one of `active_statuses`. Items not in Jellyseerr
+# at all (or in declined/available/unavailable) are skipped by the poller.
+# Leave api_key empty to disable the filter and revert to polling everything.
+jellyseerr:
+  url: http://CHANGE.ME:5055
+  api_key: "CHANGE_ME"      # Jellyseerr Settings -> General -> API Key
+  active_statuses: [pending, approved, processing]
+  force_available_on_stuck: true    # force request -> available when *arr won't import the bridge's grab
+  force_available_grace_hours: 6.0  # wait this long after the grab lands before giving up on *arr
+
+# How the AirDC++ client sees the source layer. Its Z:\ drive (an SMB share) maps
+# to `linux_root` on the host, so the host path /mnt/user/media/verified/X corresponds
+# to Z:\verified\X. Set both to match your own AirDC++ download share.
+path_map:
+  linux_root: /mnt/user/media
+  windows_root: "Z:"
+
+# Translate paths from *arr webhook payloads (series.path / movie.folderPath) into
+# host filesystem paths. The first matching arr_prefix wins. This lets you use any
+# number of root folders in Sonarr/Radarr (TV, Movies, Documentaries, ...) without
+# per-root config — they all match the same rule because they share one prefix.
+#
+# Path chain: *arr sees /share/<X>  (its container view of the media library)
+#         -> host /mnt/user/media/verified/<X>  (the source layer, where AirDC++ writes)
+#         -> AirDC++ SMB Z:\verified\<X>  (path_map applies, separators flipped)
+path_translate:
+  - arr_prefix: /share
+    fs_prefix: /mnt/user/media/verified
+
+# (Optional) per-kind library root hints — currently unused by the event handlers
+# but kept for documentation/future filtering. Webhook path is the source of truth.
+root_folders:
+  tv:
+    arr_path: /share/TV
+    fs_path: /mnt/user/media/verified/TV
+  movies:
+    arr_path: /share/Movies
+    fs_path: /mnt/user/media/verified/Movies
+
+# Match + dedup behavior. Once an episode/movie key is queued, the bridge never
+# queues another release for the same key, regardless of later/better matches.
+quality:
+  # PRIMARY: which qualities to grab and in what order is taken from each item's
+  # Sonarr/Radarr QUALITY PROFILE (the bridge reads /api/v3/qualityprofile and
+  # uses the profile's allowed qualities, most-preferred first — source+resolution,
+  # e.g. WEB 720p before WEB 1080p before BluRay 1080p). Manage it in the *arr UI.
+  #
+  # The keys below are a FALLBACK, used only when a profile can't be read.
+  # Optional `priority` overrides everything with an explicit ordered list of
+  # "<source> <resolution>" specs (source matches a substring: WEB/HDTV/BluRay/DVD):
+  #   priority: [WEB 720p, WEB 1080p, HDTV 720p, HDTV 1080p, BluRay 720p, BluRay 1080p]
+  priority: []
+  # Legacy fallback (used when neither a profile nor `priority` is available):
+  accepted_keywords: [WEB, WEB-DL, BluRay, HDTV, WEBRip]
+  resolutions: [1080p, 720p]  # accepted resolutions, in preference order
+  # These bounds are checked against the *total release size* (sum of all files
+  # in the hub release folder), not per-file. Multi-volume RAR releases of one
+  # TV episode are typically 1.5–4 GB total.
+  episode_size_mb: [200, 12000]
+  movie_size_mb: [1000, 30000]
+
+poller:
+  interval_seconds: 900       # 15 min per full sweep
+  per_item_jitter_seconds: 60 # spread requests
+  # Delay (hours) after a TV episode's air date before the bridge starts
+  # searching for it — scene releases usually appear a while after broadcast.
+  # 0 = search from air time; 24 = wait 1 day; supports fractions (e.g. 6).
+  air_offset_hours: 0
+  # A movie is only "done" once its queued release folder actually appears on
+  # disk (verified via AirDC++). If it never lands / stays a partial for longer
+  # than this many hours, the bridge assumes the grab stalled and re-searches it.
+  download_grace_hours: 24
+  # Age-based back-off. Older Jellyseerr requests are searched less often. The
+  # poller picks the LAST tier whose `older_than_days` matches; items younger
+  # than every tier search every sweep (no back-off). An empty list disables
+  # back-off entirely. Edit this list freely — order tiers small -> large age.
+  backoff:
+    - older_than_days: 1         # 1–7 d old: once per day
+      search_every_seconds: 86400
+    - older_than_days: 7         # 7–30 d old: every 2 days
+      search_every_seconds: 172800
+    - older_than_days: 30        # 30–90 d old: every 4 days
+      search_every_seconds: 345600
+    - older_than_days: 90        # 90+ d old: once per week
+      search_every_seconds: 604800
+
+# Background re-sync from Jellyseerr/sonarr/radarr so newly-requested items pick
+# up an active request_status without you having to POST /sync manually. Set to
+# 0 to disable. The first sync runs ~10s after the container starts.
+auto_sync:
+  interval_seconds: 900
+
+# Route children's content to dedicated *arr root folders by genre. A movie/series
+# carrying any listed genre is relocated (metadata move, moveFiles=false — files are
+# never touched) to the matching root, so its download and *arr management land
+# there. Items that already have a file are left in place. Empty roots/genres
+# disable the feature. The roots must already exist in Radarr/Sonarr.
+children_routing:
+  genres: [Family]
+  movies_root: /share/Kids/Movies
+  series_root: /share/Kids/Series
+
+# File logging on top of stdout (docker logs). The file is reset on each container
+# start and rotates by size (keeps one .1 backup) once it hits max_size_mb. The
+# path is INSIDE the container; the default lives in the /config mount so it
+# persists without an extra bind-mount. Empty log_file = stdout only (docker logs).
+logging:
+  log_file: /config/dc-bridge.log
+  max_size_mb: 50
+
+# Auto-approve PENDING Jellyseerr requests so they flow into Sonarr/Radarr and
+# download without manual approval. Movies are always approved; a TV request is
+# approved only when its requested seasons total <= tv_max_episodes (season 0
+# specials excluded) so a huge series isn't grabbed automatically. Disabled by
+# default. Turn OFF Jellyseerr's own auto-approve for this gate to apply to TV.
+auto_approve:
+  enabled: false
+  tv_max_episodes: 10

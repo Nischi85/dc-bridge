@@ -1,0 +1,24 @@
+# Single-service compose for dc-bridge. Useful if you want to build + run from
+# this directory without using the unraid template. Adjust the IP if your br0
+# subnet is different.
+version: "3.9"
+
+services:
+  dc-bridge:
+    build:
+      context: .
+    image: dc-bridge:latest
+    container_name: dc-bridge
+    networks:
+      br0:
+        ipv4_address: 192.168.1.139
+    volumes:
+      - /mnt/cache/appdata/dc-bridge:/config
+      - /mnt/cache/dc-bridge:/mnt/cache/dc-bridge
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+    restart: unless-stopped
+
+networks:
+  br0:
+    external: true
