@@ -86,7 +86,19 @@ and `*.log` are gitignored).
    - Triggers: `On Series Add` / `On Series Delete` (Sonarr),
      `On Movie Added` / `On Movie Delete` (Radarr), plus `Test`.
 
-5. **Bootstrap existing items** so dc-bridge learns about anything added before
+5. **(Optional) Wire the Jellyseerr webhook** so newly-requested items are
+   searched within seconds instead of on the next sweep. The *arr webhooks above
+   only fire when a whole series/movie is *added*; a new episode of an
+   already-tracked series fires nothing there, so Jellyseerr is the only
+   immediate signal for it. In Jellyseerr **Settings → Notifications → Webhook**:
+   - Webhook URL: `http://<bridge-ip>:8000/webhook/jellyseerr`
+   - Notification Types: `Request Pending Approval`, `Request Approved`,
+     `Request Automatically Approved`
+   - JSON Payload: leave the default (it includes `notification_type`)
+   - Enable the agent. On any request event the bridge approves it (if needed),
+     re-syncs, and immediately searches the freshly-requested item.
+
+6. **Bootstrap existing items** so dc-bridge learns about anything added before
    the webhooks existed:
    ```
    curl -X POST http://<bridge-ip>:8000/sync
@@ -124,7 +136,8 @@ doesn't change the repository field won't re-pull.
 | `POST /poll/radarr:<id>` (or `sonarr:<id>`) | Search + queue one item now. |
 | `GET /state?only_active=true` | Show the active worklist. |
 | `GET /airdcpp/probe?q=<query>` | Dry-run a hub search (no download) to sanity-check results. |
-| webhooks: `POST /webhook/{sonarr,radarr}` | Where Sonarr/Radarr notify the bridge. |
+| webhooks: `POST /webhook/{sonarr,radarr}` | Where Sonarr/Radarr notify the bridge (series/movie add → immediate search). |
+| `POST /webhook/jellyseerr` | Where Jellyseerr notifies the bridge; approves + syncs + searches freshly-requested items now. |
 
 Logs: `docker logs -f dc-bridge` (and a rotating file if `logging.log_file` is set).
 

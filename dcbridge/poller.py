@@ -82,6 +82,46 @@ async def react_to_request(app: FastAPI, item_id: str) -> None:
         log.exception("react_to_request %s failed", item_id)
 
 
+async def react_to_jellyseerr(app: FastAPI) -> None:
+    """Fired (in the background) when Jellyseerr reports a request change. Re-stamps
+    request statuses, then immediately searches every active item that has NOT been
+    searched since its request was created — i.e. a freshly-requested episode/movie —
+    so it downloads in seconds instead of waiting up to a full poller sweep + sync.
+
+    Covers the gap the *arr add-webhooks miss: a new episode of an already-added
+    series fires no SeriesAdd, so only Jellyseerr signals it's newly wanted. The
+    last_searched < request_created guard makes this a no-op for items already
+    searched/queued, so reacting to any request event is safe and idempotent."""
+    cfg: Config = app.state.cfg
+    state: State = app.state.state
+    ad: AirDCPP = app.state.airdcpp
+    try:
+        if cfg.jellyseerr.url and cfg.jellyseerr.api_key:
+            async with http_session() as http:
+                # Approve first: a freshly-created request is PENDING until the
+                # bridge approves it (Jellyseerr's own auto-approve is off), which
+                # otherwise waits for the periodic sync. Approving here flips it to
+                # processing so the sync below can match + search it immediately.
+                try:
+                    await auto_approve_requests(cfg, http)
+                except Exception:
+                    log.exception("react_to_jellyseerr: auto-approve failed")
+                await _sync_jellyseerr(cfg, state, http)
+        for item in await state.list_items():
+            if not item.get("request_status"):
+                continue
+            rc = item.get("request_created_at")
+            ls = item.get("last_searched_at")
+            if rc and (ls is None or ls < rc):
+                log.info(
+                    "jellyseerr react: searching freshly-requested %s (%s)",
+                    item["id"], item.get("title"),
+                )
+                await poll_item(cfg, state, ad, item)
+    except Exception:
+        log.exception("react_to_jellyseerr failed")
+
+
 async def handle_sonarr_event(app: FastAPI, ev) -> None:
     cfg: Config = app.state.cfg
     state: State = app.state.state

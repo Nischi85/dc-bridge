@@ -39,6 +39,7 @@ from dcbridge.poller import (
     handle_sonarr_event,
     poll_item,
     poller_loop,
+    react_to_jellyseerr,
     write_schedule_report,
 )
 
@@ -249,6 +250,21 @@ def make_app(cfg: Config) -> FastAPI:
         except Exception as e:
             raise HTTPException(400, f"bad radarr payload: {e}")
         await handle_radarr_event(app, ev)
+        return {"ok": True}
+
+    @app.post("/webhook/jellyseerr")
+    async def webhook_jellyseerr(req: Request):
+        """A Jellyseerr request changed. The *arr add-webhooks only fire when a
+        whole series/movie is added; a NEW episode of an already-tracked series
+        fires nothing there, so Jellyseerr is the only immediate signal that it's
+        newly wanted. React in the background: sync statuses + search freshly-
+        requested items now, instead of waiting up to a poller sweep + sync."""
+        body = await req.json()
+        ntype = str(body.get("notification_type") or "").upper()
+        log.info("jellyseerr webhook: %s %s", ntype, _truncate(json.dumps(body), 400))
+        if ntype in {"", "TEST_NOTIFICATION"}:
+            return {"ok": True, "test": ntype == "TEST_NOTIFICATION"}
+        asyncio.create_task(react_to_jellyseerr(app))
         return {"ok": True}
 
     return app
