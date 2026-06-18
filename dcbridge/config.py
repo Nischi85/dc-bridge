@@ -70,6 +70,8 @@ class PollerCfg(BaseModel):
     per_item_jitter_seconds: int = 60
     air_offset_hours: float = 0  # wait this long after a TV episode airs before searching
     download_grace_hours: float = 24  # how long a queued grab may take before it's deemed stalled
+    fresh_episode_hours: float = 48          # TV: an episode aired within this window
+    fresh_episode_every_seconds: int = 7200  # is searched at most this gap apart (caps back-off)
     backoff: list[BackoffTier] = Field(default_factory=list)
 
 

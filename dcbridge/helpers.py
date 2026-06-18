@@ -361,19 +361,34 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
         elif last < _iso_to_epoch(air_anchor):
             return {"due": True, "status": "aired", "next_due": now_ts,
                     "detail": f"episode aired {air_anchor}"}
+    # Request-age back-off gap (None = no applicable tier -> search every sweep).
+    gap = None
     created_at = item.get("request_created_at")
     if created_at and cfg.poller.backoff:
         age = now_ts - int(created_at)
         applicable = [t for t in cfg.poller.backoff if age >= t.older_than_days * 86400]
         if applicable:
-            tier = max(applicable, key=lambda t: t.older_than_days)
-            gap = tier.search_every_seconds
-            if now_ts - last < gap:
-                return {"due": False, "status": "backoff", "next_due": last + gap,
-                        "detail": f"every {_fmt_dur(gap)}"}
-            return {"due": True, "status": "due", "next_due": now_ts,
-                    "detail": f"every {_fmt_dur(gap)}"}
-    return {"due": True, "status": "due", "next_due": now_ts, "detail": "no back-off"}
+            gap = max(applicable, key=lambda t: t.older_than_days).search_every_seconds
+
+    # Fresh-episode override: a TV episode that aired within fresh_episode_hours is
+    # searched at (at most) the fresh cadence — capping, never slowing, the
+    # back-off. gap is None for a brand-new request (no applicable tier), so it
+    # keeps searching every sweep and newly-added items are not held back.
+    fresh = False
+    fresh_every = int(cfg.poller.fresh_episode_every_seconds)
+    air_anchor = item.get("air_anchor_utc")
+    if (kind == "tv" and air_anchor and fresh_every
+            and now_ts - _iso_to_epoch(air_anchor) < cfg.poller.fresh_episode_hours * 3600):
+        fresh = True
+        if gap is not None:
+            gap = min(gap, fresh_every)
+
+    if gap is None:
+        return {"due": True, "status": "due", "next_due": now_ts, "detail": "no back-off"}
+    detail = f"fresh, every {_fmt_dur(gap)}" if fresh else f"every {_fmt_dur(gap)}"
+    if now_ts - last < gap:
+        return {"due": False, "status": "backoff", "next_due": last + gap, "detail": detail}
+    return {"due": True, "status": "due", "next_due": now_ts, "detail": detail}
 
 
 def score_result(

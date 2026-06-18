@@ -90,6 +90,11 @@ poller:
   # disk (verified via AirDC++). If it never lands / stays a partial for longer
   # than this many hours, the bridge assumes the grab stalled and re-searches it.
   download_grace_hours: 24
+  # TV: an episode that aired within this window is searched at the fresh cadence
+  # below, capping (never slowing) the age back-off. New requests still search
+  # every sweep.
+  fresh_episode_hours: 48
+  fresh_episode_every_seconds: 7200  # every 2h
   # Age-based back-off. Older Jellyseerr requests are searched less often. The
   # poller picks the LAST tier whose `older_than_days` matches; items younger
   # than every tier search every sweep (no back-off). An empty list disables
