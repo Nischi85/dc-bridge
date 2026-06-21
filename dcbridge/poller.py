@@ -22,6 +22,7 @@ from dcbridge.helpers import (
     _utc_iso,
     compute_cadence,
     episode_keys_from_name,
+    has_unwanted_subs,
     is_adult_release,
     is_foreign_language,
     is_sd_release,
@@ -659,6 +660,11 @@ async def poll_item(
             # set (Nordic, East Asian and MULTi tags are not rejected by default).
             if is_foreign_language(release_name):
                 log.debug("poll %s: skip %r — foreign-language dub", item_id, release_name)
+                continue
+            # Subtitle guard: reject releases muxed with unwanted foreign subs
+            # (e.g. 'Custom.DKsubs' Danish subs) even when the audio is English.
+            if has_unwanted_subs(release_name):
+                log.debug("poll %s: skip %r — unwanted foreign subs", item_id, release_name)
                 continue
             # Movie title guard: the release must START with the movie title
             # (movies have no anchored-phrase guard like TV). Rejects a different

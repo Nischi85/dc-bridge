@@ -204,12 +204,10 @@ _FOREIGN_LANG_RE = re.compile(
 )
 
 
-def is_foreign_language(name: str) -> bool:
-    """True if `name` carries a rejected foreign-language dub tag (POLISH,
-    GERMAN, FRENCH, …; see _FOREIGN_LANG_RE). Scans only the scene tag block AFTER the year or SxxExx
-    marker, so a language word that is part of the TITLE is not falsely rejected
-    (e.g. 'Russian.Doll.S01E01...', 'The.French.Dispatch.2021...'). Falls back to
-    the whole name when neither marker is present (yearless SD release)."""
+def _scene_tag_region(name: str) -> str:
+    """The scene-tag block AFTER the last year or SxxExx marker (falls back to the
+    whole name when neither is present), so a language/sub word that is part of the
+    TITLE isn't matched as a tag (e.g. 'Russian.Doll.S01E01...')."""
     end = 0
     for rx in (_YEAR_RE, _SEASON_OR_EP_RE):
         last = None
@@ -217,8 +215,31 @@ def is_foreign_language(name: str) -> bool:
             pass  # keep only the last occurrence
         if last:
             end = max(end, last.end())
-    region = name[end:] if end else name
-    return _FOREIGN_LANG_RE.search(region) is not None
+    return name[end:] if end else name
+
+
+def is_foreign_language(name: str) -> bool:
+    """True if `name` carries a rejected foreign-language dub tag (POLISH,
+    GERMAN, FRENCH, …; see _FOREIGN_LANG_RE). Scans only the scene tag block AFTER
+    the year or SxxExx marker, so a language word that is part of the TITLE is not
+    falsely rejected (e.g. 'Russian.Doll.S01E01...', 'The.French.Dispatch.2021...')."""
+    return _FOREIGN_LANG_RE.search(_scene_tag_region(name)) is not None
+
+
+# Unwanted foreign-subtitle tags. A release may carry English audio but be muxed
+# with (often hardcoded/burned-in) subs in a language you don't want — e.g.
+# 'Deep.Water.2026.Custom.DKsubs.1080p.WEB-DL...'. Danish (DK/DANiSH subs, DANSK)
+# is rejected; Swedish and other Nordic subs are kept. Edit to taste.
+_FOREIGN_SUBS_RE = re.compile(
+    r"\bDK\.?SUBS?\b|\bDANiSH\.?SUBS?\b|\bDANSK\b",
+    re.I,
+)
+
+
+def has_unwanted_subs(name: str) -> bool:
+    """True if `name` carries an unwanted foreign-subtitle tag (DKsubs, …). Scans
+    only the scene-tag block after the year/episode marker, like is_foreign_language."""
+    return _FOREIGN_SUBS_RE.search(_scene_tag_region(name)) is not None
 
 
 _TITLE_SPLIT_RE = re.compile(r"[^a-z0-9]+")
