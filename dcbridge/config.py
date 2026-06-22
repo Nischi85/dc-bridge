@@ -106,6 +106,21 @@ class ChildrenRoutingCfg(BaseModel):
     series_root: str = ""   # Sonarr root, e.g. /share/Kids/Series
 
 
+class FiltersCfg(BaseModel):
+    """Release denylists. A scene tag NOT listed is kept, so Nordic/East-Asian/MULTi
+    tags are absent from the defaults on purpose. An empty list disables that filter."""
+    # Foreign-DUB scene tags to reject (whole-token, case-insensitive).
+    reject_dub_tags: list[str] = Field(default_factory=lambda: [
+        "GERMAN", "FRENCH", "ITALIAN", "SPANISH", "POLISH", "RUSSIAN", "CZECH",
+        "HUNGARIAN", "PORTUGUESE", "BRAZILIAN", "TURKISH", "DUTCH", "UKRAINIAN",
+        "ROMANIAN", "BULGARIAN", "HINDI", "DANSK",
+        "PL", "PLDUB", "PLSUB", "GER", "ITA", "SPA", "FRE", "RUS", "CZ", "HUN", "RO", "UA", "HEB",
+    ])
+    # Subtitle-language stems to reject on English-audio releases; each matches
+    # "<stem>sub"/"<stem>subs" with an optional dot (DK -> DKsubs, DK.SUBS).
+    reject_sub_tags: list[str] = Field(default_factory=lambda: ["DK", "DANiSH"])
+
+
 class Config(BaseModel):
     bridge: BridgeCfg = BridgeCfg()
     airdcpp: AirDCPPCfg
@@ -120,6 +135,7 @@ class Config(BaseModel):
     children_routing: ChildrenRoutingCfg = ChildrenRoutingCfg()
     logging: LoggingCfg = LoggingCfg()
     auto_approve: AutoApproveCfg = AutoApproveCfg()
+    filters: FiltersCfg = FiltersCfg()
 
 
 def load_config(path: str = "/config/config.yaml") -> Config:

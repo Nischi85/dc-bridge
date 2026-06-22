@@ -141,3 +141,20 @@ logging:
 auto_approve:
   enabled: false
   tv_max_episodes: 10
+
+# Release denylists. Both are matched whole-token and case-insensitive, only within
+# the scene-tag block after the year/SxxExx marker — so a language word in the title
+# (e.g. The.Danish.Girl, Russian.Doll) is never falsely rejected. A tag you DON'T
+# list is kept; the defaults below deliberately omit Nordic (SWEDISH/NORWEGiAN/
+# FiNNiSH), East-Asian (KOREAN/JAPANESE/CHINESE) and MULTi. An empty list disables
+# that filter. Omit the whole block to keep these defaults.
+filters:
+  # Reject foreign-DUB releases tagged with any of these (full words + scene
+  # abbreviations). DANSK is a standalone Danish tag, so it lives here.
+  reject_dub_tags: [GERMAN, FRENCH, ITALIAN, SPANISH, POLISH, RUSSIAN, CZECH,
+                    HUNGARIAN, PORTUGUESE, BRAZILIAN, TURKISH, DUTCH, UKRAINIAN,
+                    ROMANIAN, BULGARIAN, HINDI, DANSK,
+                    PL, PLDUB, PLSUB, GER, ITA, SPA, FRE, RUS, CZ, HUN, RO, UA, HEB]
+  # Reject English-audio releases muxed with subs in these languages. Each stem
+  # matches "<stem>sub"/"<stem>subs" with an optional dot, e.g. DK -> DKsubs / DK.SUBS.
+  reject_sub_tags: [DK, DANiSH]

@@ -190,18 +190,54 @@ def is_sd_release(name: str) -> bool:
     return bool(_SD_SOURCE_RE.search(name))
 
 
-# Foreign-language dub tags to reject. Note the deliberate exclusions: Nordic
-# (NORDiC/SWEDISH/DANiSH/NORWEGiAN/FiNNiSH) and East Asian (KOREAN/JAPANESE/
-# CHINESE) tags are NOT rejected, and neither is MULTi/MULTiSUBS (multi-language,
-# usually includes English). Edit this pattern to match the languages you keep.
-_FOREIGN_LANG_RE = re.compile(
-    r"\b(?:GERMAN|FRENCH|ITALIAN|SPANISH|POLISH|RUSSIAN|CZECH|HUNGARIAN|"
-    r"PORTUGUESE|BRAZILIAN|TURKISH|DUTCH|UKRAINIAN|ROMANIAN|BULGARIAN|HINDI|"
+# Two denylists, both driven by the `filters` block in config.yaml: foreign-DUB
+# scene tags, and subtitle-language stems for English-audio releases muxed with
+# unwanted subs. The defaults below reproduce the historical hardcoded sets and
+# stay in effect until configure_filters() runs at startup. A tag NOT listed is
+# kept — Nordic (SWEDISH/NORWEGiAN/FiNNiSH), East-Asian (KOREAN/JAPANESE/CHINESE)
+# and MULTi are absent from the defaults on purpose. Matching is whole-token,
+# case-insensitive, within the scene-tag region after the year/episode marker, so
+# a language word in the TITLE (e.g. 'Russian.Doll', 'The.Danish.Girl') is never
+# falsely rejected.
+_DEFAULT_DUB_TAGS = [
+    "GERMAN", "FRENCH", "ITALIAN", "SPANISH", "POLISH", "RUSSIAN", "CZECH",
+    "HUNGARIAN", "PORTUGUESE", "BRAZILIAN", "TURKISH", "DUTCH", "UKRAINIAN",
+    "ROMANIAN", "BULGARIAN", "HINDI", "DANSK",
     # Scene language abbreviations (whole-token only, so they don't match inside
     # group names like SPARKS/RUSTED/PLUTONIUM). PLDUB/PLSUB = Polish dub/sub.
-    r"PL|PLDUB|PLSUB|GER|ITA|SPA|FRE|RUS|CZ|HUN|RO|UA|HEB)\b",
-    re.I,
-)
+    "PL", "PLDUB", "PLSUB", "GER", "ITA", "SPA", "FRE", "RUS", "CZ", "HUN", "RO", "UA", "HEB",
+]
+# Subtitle stems: each matches '<stem>sub'/'<stem>subs' with an optional dot, e.g.
+# DK -> DKsubs / DK.SUBS, as in 'Deep.Water.2026.Custom.DKsubs.1080p.WEB-DL...'.
+_DEFAULT_SUB_TAGS = ["DK", "DANiSH"]
+
+_NEVER_RE = re.compile(r"(?!)")  # matches nothing — used when a denylist is empty
+
+
+def compile_dub_re(tags: list[str]) -> re.Pattern[str]:
+    """Whole-token, case-insensitive alternation of foreign-dub tags (empty -> never)."""
+    if not tags:
+        return _NEVER_RE
+    return re.compile(r"\b(?:" + "|".join(re.escape(t) for t in tags) + r")\b", re.I)
+
+
+def compile_subs_re(stems: list[str]) -> re.Pattern[str]:
+    """Match '<stem>sub'/'<stem>subs' (optional dot) for each stem (empty -> never)."""
+    if not stems:
+        return _NEVER_RE
+    return re.compile(r"\b(?:" + "|".join(re.escape(s) for s in stems) + r")\.?SUBS?\b", re.I)
+
+
+_FOREIGN_LANG_RE = compile_dub_re(_DEFAULT_DUB_TAGS)
+_FOREIGN_SUBS_RE = compile_subs_re(_DEFAULT_SUB_TAGS)
+
+
+def configure_filters(reject_dub_tags: list[str], reject_sub_tags: list[str]) -> None:
+    """Recompile the dub/subtitle denylists from config. Called once at startup;
+    when the `filters` block is omitted the module defaults stay in effect."""
+    global _FOREIGN_LANG_RE, _FOREIGN_SUBS_RE
+    _FOREIGN_LANG_RE = compile_dub_re(reject_dub_tags)
+    _FOREIGN_SUBS_RE = compile_subs_re(reject_sub_tags)
 
 
 def _scene_tag_region(name: str) -> str:
@@ -220,25 +256,16 @@ def _scene_tag_region(name: str) -> str:
 
 def is_foreign_language(name: str) -> bool:
     """True if `name` carries a rejected foreign-language dub tag (POLISH,
-    GERMAN, FRENCH, …; see _FOREIGN_LANG_RE). Scans only the scene tag block AFTER
-    the year or SxxExx marker, so a language word that is part of the TITLE is not
-    falsely rejected (e.g. 'Russian.Doll.S01E01...', 'The.French.Dispatch.2021...')."""
+    GERMAN, FRENCH, …; from filters.reject_dub_tags). Scans only the scene tag block
+    AFTER the year or SxxExx marker, so a language word that is part of the TITLE is
+    not falsely rejected (e.g. 'Russian.Doll.S01E01...', 'The.French.Dispatch.2021...')."""
     return _FOREIGN_LANG_RE.search(_scene_tag_region(name)) is not None
 
 
-# Unwanted foreign-subtitle tags. A release may carry English audio but be muxed
-# with (often hardcoded/burned-in) subs in a language you don't want — e.g.
-# 'Deep.Water.2026.Custom.DKsubs.1080p.WEB-DL...'. Danish (DK/DANiSH subs, DANSK)
-# is rejected; Swedish and other Nordic subs are kept. Edit to taste.
-_FOREIGN_SUBS_RE = re.compile(
-    r"\bDK\.?SUBS?\b|\bDANiSH\.?SUBS?\b|\bDANSK\b",
-    re.I,
-)
-
-
 def has_unwanted_subs(name: str) -> bool:
-    """True if `name` carries an unwanted foreign-subtitle tag (DKsubs, …). Scans
-    only the scene-tag block after the year/episode marker, like is_foreign_language."""
+    """True if `name` carries an unwanted foreign-subtitle tag (DKsubs, …; stems from
+    filters.reject_sub_tags). Scans only the scene-tag block after the year/episode
+    marker, like is_foreign_language."""
     return _FOREIGN_SUBS_RE.search(_scene_tag_region(name)) is not None
 
 

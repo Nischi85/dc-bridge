@@ -7,6 +7,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 log = logging.getLogger("dc_bridge")
 from dcbridge.config import load_config
+from dcbridge.helpers import configure_filters
 from dcbridge.web import make_app
 import uvicorn
 
@@ -55,6 +56,7 @@ def setup_logging(level: str, log_file: str = "", max_size_mb: int = 50) -> None
 
 def main() -> None:
     cfg = load_config(os.environ.get("CONFIG_PATH", "/config/config.yaml"))
+    configure_filters(cfg.filters.reject_dub_tags, cfg.filters.reject_sub_tags)
     setup_logging(cfg.bridge.log_level, cfg.logging.log_file, cfg.logging.max_size_mb)
     app = make_app(cfg)
     uvicorn.run(app, host=cfg.bridge.host, port=cfg.bridge.port, log_config=None)
