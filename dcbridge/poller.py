@@ -333,11 +333,14 @@ async def poller_loop(app: FastAPI) -> None:
             # One disk probe per movie for the whole sweep, shared by the schedule
             # report and every poll_item, instead of each re-probing the same movie.
             completion = await build_completion_cache(ad, cfg, state, items, now_ts)
+            # One AirDC++ queue snapshot for the whole sweep — the queue is global,
+            # so every poll_item shares it instead of re-fetching per item.
+            bundles = await ad.list_bundles() or []
             await write_schedule_report(state, cfg, ad, now_ts, completion)
             for it in items:
                 searched = False
                 try:
-                    searched = await poll_item(cfg, state, ad, it, completion)
+                    searched = await poll_item(cfg, state, ad, it, completion, bundles)
                 except Exception:
                     log.exception("poll_item failed for %s", it.get("id"))
                 # Jitter only spreads real AirDC++ searches; skipped or backed-off
@@ -435,9 +438,284 @@ async def remove_finished_tv_bundles(
         await trigger_arr_rescan(cfg, item_id)
 
 
+def _select_candidates(
+    results: list[dict], kind: str, title: str, item: dict, cfg: Config,
+    item_priority: list[str], needed_keys: set[str], item_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Group raw hub hits into release folders and apply the accept/reject guards
+    (quality, adult, foreign-language dub, unwanted subs, title, year, season).
+
+    Returns {episode_key (or "movie") -> [candidate release dicts]}. Pure and
+    synchronous — it neither touches the network nor state, so all side effects
+    stay in poll_item / _queue_candidates.
+    """
+    # Build release-folder candidates. Two result shapes feed the same
+    # per-folder bucket (keyed by the release folder's hub path):
+    #   - a DIRECTORY result = a whole release folder. Preferred: queue it by
+    #     its `id` so AirDC++ pulls the entire folder intact (see queue loop).
+    #   - loose FILE results, grouped by their hub parent dir, for hubs that
+    #     only return the individual files inside a release.
+    groups: dict[str, dict[str, Any]] = {}
+    for r in results:
+        path = r.get("path") or ""
+        if _is_directory_result(r):
+            release_name = (r.get("name") or path).rstrip("/").rsplit(_HUB_PATH_SEP, 1)[-1]
+            if not release_name:
+                continue
+            g = groups.setdefault(
+                path.rstrip("/"),
+                {"release_name": release_name, "files": [], "total_size": 0, "dir_id": None},
+            )
+            g["dir_id"] = r.get("id")
+            g["total_size"] = max(g["total_size"], int(r.get("size") or 0))
+        else:
+            parent_dir, release_name = _parent_dir_and_name(path)
+            if not parent_dir or not release_name:
+                continue
+            g = groups.setdefault(
+                parent_dir,
+                {"release_name": release_name, "files": [], "total_size": 0, "dir_id": None},
+            )
+            g["files"].append(r)
+            g["total_size"] += int(r.get("size") or 0)
+
+    # Evaluate each release-folder group as a candidate.
+    candidates_by_key: dict[str, list[dict[str, Any]]] = {}
+    for parent_dir, g in groups.items():
+        release_name = g["release_name"]
+        total_size = g["total_size"]
+        if not passes_quality(release_name, total_size, kind, cfg.quality, item_priority):
+            continue
+        # Adult-content reject: scene porn is tagged XXX and often shares a
+        # word with a real title (e.g. "Roccos.World.Feet.Obsession.2.XXX").
+        if is_adult_release(release_name, title):
+            log.debug("poll %s: skip %r — adult/XXX content", item_id, release_name)
+            continue
+        # Language guard: reject foreign-language dubs (POLISH, GERMAN,
+        # FRENCH, …) so e.g. 'In.The.Cut.2003.POLISH.720p.WEB' isn't grabbed
+        # over the English BluRay. See _FOREIGN_LANG_RE for the kept/rejected
+        # set (Nordic, East Asian and MULTi tags are not rejected by default).
+        if is_foreign_language(release_name):
+            log.debug("poll %s: skip %r — foreign-language dub", item_id, release_name)
+            continue
+        # Subtitle guard: reject releases muxed with unwanted foreign subs
+        # (e.g. 'Custom.DKsubs' Danish subs) even when the audio is English.
+        if has_unwanted_subs(release_name):
+            log.debug("poll %s: skip %r — unwanted foreign subs", item_id, release_name)
+            continue
+        # Movie title guard: the release must START with the movie title
+        # (movies have no anchored-phrase guard like TV). Rejects a different
+        # film that merely contains the title mid-name — e.g. the right year
+        # but wrong movie "WhatsApp.Obsession.The.Murder...2026" for the movie
+        # "Obsession", or "Roccos...Obsession.XXX". Scene abbreviation of long
+        # subtitles is tolerated (first 2 words), so "Johan.Falk.GSI..." passes.
+        if kind == "movie" and not release_starts_with_title(release_name, title):
+            log.debug("poll %s: skip %r — not the requested movie (title not at start)",
+                      item_id, release_name)
+            continue
+        # Year guard for movies: a sequel request ("...2", 2026) must not grab
+        # the same-title older film. DVD/SD releases legitimately omit the year,
+        # so a YEARLESS SD release is allowed; a yearless HD release, or an SD
+        # release with a WRONG year, is rejected.
+        if kind == "movie" and not release_matches_year(release_name, item.get("year")):
+            if not (is_sd_release(release_name) and not _YEAR_RE.search(release_name)):
+                log.debug(
+                    "poll %s: skip %r — year mismatch (want %s±1)",
+                    item_id, release_name, item.get("year"),
+                )
+                continue
+        if kind == "tv":
+            # Title guard: the hub search is a loose token match, so a search
+            # for "Bad Judge" returns "Judge.Judy..." and "Star City" returns
+            # "Star.Trek.Picard...Stardust.City". Reject any release whose name
+            # doesn't carry the requested series title as a contiguous phrase.
+            if not release_matches_title(release_name, title, anchored=True):
+                log.debug(
+                    "poll %s: skip %r — title doesn't match series %r",
+                    item_id, release_name, title,
+                )
+                continue
+            eks = episode_keys_from_name(release_name)
+            if not eks:
+                continue
+            for ek in eks:
+                # Skip Season 0 specials (S00Exx) — we only want real seasons.
+                if ek.upper().startswith("S00"):
+                    log.debug("poll %s: skip %r — season 0 special", item_id, release_name)
+                    continue
+                # Only queue still-needed episodes (wanted, not already queued,
+                # not already downloaded) — never re-grab one we have or one
+                # that's already downloading.
+                if ek not in needed_keys:
+                    continue
+                candidates_by_key.setdefault(ek, []).append(
+                    {**g, "parent_dir": parent_dir}
+                )
+        else:
+            # Reject TV releases that loosely matched the movie title (e.g.
+            # "Deep Water" -> "Deep.Water.Salvage.S01..."). A movie folder
+            # should never contain a season pack or episode-numbered release,
+            # so reject any season/episode marker (bare Sxx, SxxExx, "Season N").
+            if _SEASON_OR_EP_RE.search(release_name):
+                log.debug(
+                    "poll %s: skip %r — looks like a TV release (season/episode), not a movie",
+                    item_id, release_name,
+                )
+                continue
+            candidates_by_key.setdefault("movie", []).append(
+                {**g, "parent_dir": parent_dir}
+            )
+    return candidates_by_key
+
+
+async def _queue_candidates(
+    ad: AirDCPP, state: State, cfg: Config, iid: str, kind: str, item_id: str,
+    candidates_by_key: dict[str, list[dict[str, Any]]], in_queue_keys: set[str],
+    target_base_smb: str, item_priority: list[str],
+) -> int:
+    """Queue the best release for each still-needed key into AirDC++, mirroring
+    the hub's sub-folder layout (Sample/, etc.) under the destination. Returns the
+    number of keys queued. Movie keys get a completed marker here; TV done-ness
+    comes from hasFile/finish, so TV keys are tracked via the live queue instead.
+    """
+    queued = 0
+    # Queue episodes oldest-first (S01E01 before S01E02, season 1 before 2).
+    # Keys are zero-padded SxxExx so a plain lexicographic sort is already
+    # chronological; the lone "movie" key is unaffected.
+    for key in sorted(candidates_by_key):
+        candidates = candidates_by_key[key]
+        if key in in_queue_keys:
+            continue  # already in the AirDC++ queue (bridge- or user-queued)
+        # Movies dedup on the completed marker (verified on disk by the
+        # fast-skip); TV relies on the live queue check above, so an episode
+        # you remove from the queue gets searched & re-grabbed next sweep.
+        if kind == "movie" and await state.is_completed(item_id, key):
+            continue
+        best = max(
+            candidates,
+            key=lambda g: score_result(
+                g["release_name"], g["total_size"], cfg.quality, item_priority
+            ),
+        )
+        release_name: str = best["release_name"]
+        release_hub_path: str = best["parent_dir"]  # e.g. /TV/Drama/<release>
+
+        # Season layer for TV (sonarr's seasonFolderFormat is "Season.{season}"
+        # — dot, not space). Movies go straight under the movie root.
+        if kind == "tv":
+            m_season = re.match(r"S(\d{1,2})E\d", key, re.I)
+            season_num = int(m_season.group(1)) if m_season else 0
+            release_root_smb = target_base_smb + f"Season.{season_num}\\" + release_name + "\\"
+            parent_for_folder = target_base_smb + f"Season.{season_num}\\"
+        else:
+            release_root_smb = target_base_smb + release_name + "\\"
+            parent_for_folder = target_base_smb
+
+        # Whole-folder path: when the hub gave a directory result for this
+        # release, queue the entire folder by its id into the PARENT dir.
+        # AirDC++ recreates the release folder under the parent, so we pass
+        # the parent (not release_root_smb) to avoid a name/name nest.
+        if best.get("dir_id"):
+            resp = await ad.queue_result(iid, best["dir_id"], parent_for_folder)
+            if resp is not None:
+                bid = (resp.get("bundle_info") or {}).get("id")
+                if kind == "movie":  # TV done-ness comes from hasFile/finish, not queue time
+                    await state.mark_completed(
+                        item_id, key, str(bid) if bid else None, release_name
+                    )
+                queued += 1
+                log.info(
+                    "queue %s key=%s folder=%r -> %s OK (whole folder)",
+                    item_id, key, release_name, parent_for_folder,
+                )
+            else:
+                log.warning(
+                    "queue %s key=%s folder=%r -> failed",
+                    item_id, key, release_name,
+                )
+            continue
+
+        # Secondary search by the full release name to capture EVERYTHING
+        # in the release folder (the broad show search only returns the
+        # top-relevance .r0X parts; sample folders + .sfv usually drop off
+        # the per-hub result limit). Then queue every file under the release
+        # path, preserving its sub-directory (Sample/, etc.) under the
+        # destination so the on-disk layout mirrors the hub layout.
+        iid2 = await ad.create_search_instance()
+        secondary_files: list[dict] = []
+        try:
+            if iid2 is not None and await ad.hub_search(iid2, release_name, extensions=None):
+                await asyncio.sleep(8.0)
+                rs2 = await ad.get_results(iid2, 0, 300)
+                for r in rs2:
+                    if _is_directory_result(r):
+                        continue
+                    p = r.get("path") or ""
+                    if p.startswith(release_hub_path + _HUB_PATH_SEP) or p == release_hub_path:
+                        secondary_files.append(r)
+        finally:
+            if iid2 is not None:
+                try:
+                    await ad.delete_instance(iid2)
+                except Exception:
+                    pass
+
+        # If the secondary search didn't return anything (rare), fall back
+        # to the files we already grouped from the primary sweep.
+        files_to_queue = secondary_files or best["files"]
+        log.info(
+            "queue %s key=%s release=%r files=%d (primary=%d secondary=%d) root=%s",
+            item_id,
+            key,
+            release_name,
+            len(files_to_queue),
+            len(best["files"]),
+            len(secondary_files),
+            release_root_smb,
+        )
+
+        queued_files = 0
+        last_bundle_id: Optional[str] = None
+        seen_tths: set[str] = set()  # in-poll dedup vs the same TTH on multiple hubs
+        for f in files_to_queue:
+            tth = f.get("tth")
+            if not tth or tth in seen_tths:
+                continue
+            seen_tths.add(tth)
+            # Compute the destination for this specific file: release_root +
+            # whatever sub-path the file sits at inside the release folder.
+            file_path = f.get("path") or ""
+            target_for_file = release_root_smb
+            if file_path.startswith(release_hub_path + _HUB_PATH_SEP):
+                sub = file_path[len(release_hub_path) + 1:]
+                sub_dir = sub.rsplit(_HUB_PATH_SEP, 1)[0] if _HUB_PATH_SEP in sub else ""
+                if sub_dir:
+                    target_for_file = release_root_smb + sub_dir.replace(_HUB_PATH_SEP, "\\") + "\\"
+            resp = await ad.queue_result(iid, tth, target_for_file)
+            if resp is not None:
+                queued_files += 1
+                bi = (resp.get("bundle_info") or {}).get("id")
+                if bi:
+                    last_bundle_id = str(bi)
+        if queued_files:
+            if kind == "movie":  # TV done-ness comes from hasFile/finish, not queue time
+                await state.mark_completed(
+                    item_id, key, last_bundle_id, release_name
+                )
+            queued += 1
+            log.info(
+                "queue %s key=%s OK (%d files queued)",
+                item_id,
+                key,
+                queued_files,
+            )
+    return queued
+
+
 async def poll_item(
     cfg: Config, state: State, ad: AirDCPP, item: dict,
     completion: Optional[dict[str, str]] = None,
+    bundles: Optional[list[dict]] = None,
 ) -> bool:
     """Run one search round for one tracked item; queue matches not yet completed.
 
@@ -536,6 +814,12 @@ async def poll_item(
             )
             return False
 
+    # The AirDC++ queue is global, so the poller sweep fetches it once and shares
+    # the snapshot across every item via `bundles`. Fall back to a direct fetch
+    # for the one-off /poll endpoint, which passes no cache.
+    if bundles is None:
+        bundles = await ad.list_bundles() or []
+
     # TV: snapshot the AirDC++ queue once. Clear finished episode bundles (files
     # stay on disk) + targeted-rescan the series so *arr imports them; and note
     # which episodes already have a bundle so we neither search nor re-grab them
@@ -544,7 +828,7 @@ async def poll_item(
     needed_keys: set[str] = set()
     if kind == "tv":
         wanted = set(item.get("monitored_keys") or [])
-        tv_bundles = await ad.list_bundles() or []
+        tv_bundles = bundles
         await remove_finished_tv_bundles(ad, state, cfg, item, tv_bundles)
         in_queue_keys = _series_keys_in_queue(tv_bundles, title)
         # Still needed = wanted, minus what's already in the queue, minus what we
@@ -572,7 +856,7 @@ async def poll_item(
         if not needed_keys:
             log.info("poll %s: all wanted episodes already queued or downloaded — not searching", item_id)
             return False
-    elif kind == "movie" and _movie_in_queue(await ad.list_bundles() or [], title, item.get("year")):
+    elif kind == "movie" and _movie_in_queue(bundles, title, item.get("year")):
         log.debug("poll %s: movie already in the AirDC++ queue — not searching", item_id)
         return False
 
@@ -612,254 +896,18 @@ async def poll_item(
         results = await ad.get_results(iid, 0, 500)
         log.info("poll %s: %d hub result(s)", item_id, len(results))
 
-        # Build release-folder candidates. Two result shapes feed the same
-        # per-folder bucket (keyed by the release folder's hub path):
-        #   - a DIRECTORY result = a whole release folder. Preferred: queue it by
-        #     its `id` so AirDC++ pulls the entire folder intact (see queue loop).
-        #   - loose FILE results, grouped by their hub parent dir, for hubs that
-        #     only return the individual files inside a release.
-        groups: dict[str, dict[str, Any]] = {}
-        for r in results:
-            path = r.get("path") or ""
-            if _is_directory_result(r):
-                release_name = (r.get("name") or path).rstrip("/").rsplit(_HUB_PATH_SEP, 1)[-1]
-                if not release_name:
-                    continue
-                g = groups.setdefault(
-                    path.rstrip("/"),
-                    {"release_name": release_name, "files": [], "total_size": 0, "dir_id": None},
-                )
-                g["dir_id"] = r.get("id")
-                g["total_size"] = max(g["total_size"], int(r.get("size") or 0))
-            else:
-                parent_dir, release_name = _parent_dir_and_name(path)
-                if not parent_dir or not release_name:
-                    continue
-                g = groups.setdefault(
-                    parent_dir,
-                    {"release_name": release_name, "files": [], "total_size": 0, "dir_id": None},
-                )
-                g["files"].append(r)
-                g["total_size"] += int(r.get("size") or 0)
+        # Group the raw hits into release folders and run the accept/reject
+        # guards (quality / adult / language / subs / title / year / season).
+        candidates_by_key = _select_candidates(
+            results, kind, title, item, cfg, item_priority, needed_keys, item_id
+        )
 
-        # Evaluate each release-folder group as a candidate.
-        candidates_by_key: dict[str, list[dict[str, Any]]] = {}
-        for parent_dir, g in groups.items():
-            release_name: str = g["release_name"]
-            total_size: int = g["total_size"]
-            if not passes_quality(release_name, total_size, kind, cfg.quality, item_priority):
-                continue
-            # Adult-content reject: scene porn is tagged XXX and often shares a
-            # word with a real title (e.g. "Roccos.World.Feet.Obsession.2.XXX").
-            if is_adult_release(release_name, title):
-                log.debug("poll %s: skip %r — adult/XXX content", item_id, release_name)
-                continue
-            # Language guard: reject foreign-language dubs (POLISH, GERMAN,
-            # FRENCH, …) so e.g. 'In.The.Cut.2003.POLISH.720p.WEB' isn't grabbed
-            # over the English BluRay. See _FOREIGN_LANG_RE for the kept/rejected
-            # set (Nordic, East Asian and MULTi tags are not rejected by default).
-            if is_foreign_language(release_name):
-                log.debug("poll %s: skip %r — foreign-language dub", item_id, release_name)
-                continue
-            # Subtitle guard: reject releases muxed with unwanted foreign subs
-            # (e.g. 'Custom.DKsubs' Danish subs) even when the audio is English.
-            if has_unwanted_subs(release_name):
-                log.debug("poll %s: skip %r — unwanted foreign subs", item_id, release_name)
-                continue
-            # Movie title guard: the release must START with the movie title
-            # (movies have no anchored-phrase guard like TV). Rejects a different
-            # film that merely contains the title mid-name — e.g. the right year
-            # but wrong movie "WhatsApp.Obsession.The.Murder...2026" for the movie
-            # "Obsession", or "Roccos...Obsession.XXX". Scene abbreviation of long
-            # subtitles is tolerated (first 2 words), so "Johan.Falk.GSI..." passes.
-            if kind == "movie" and not release_starts_with_title(release_name, title):
-                log.debug("poll %s: skip %r — not the requested movie (title not at start)",
-                          item_id, release_name)
-                continue
-            # Year guard for movies: a sequel request ("...2", 2026) must not grab
-            # the same-title older film. DVD/SD releases legitimately omit the year,
-            # so a YEARLESS SD release is allowed; a yearless HD release, or an SD
-            # release with a WRONG year, is rejected.
-            if kind == "movie" and not release_matches_year(release_name, item.get("year")):
-                if not (is_sd_release(release_name) and not _YEAR_RE.search(release_name)):
-                    log.debug(
-                        "poll %s: skip %r — year mismatch (want %s±1)",
-                        item_id, release_name, item.get("year"),
-                    )
-                    continue
-            if kind == "tv":
-                # Title guard: the hub search is a loose token match, so a search
-                # for "Bad Judge" returns "Judge.Judy..." and "Star City" returns
-                # "Star.Trek.Picard...Stardust.City". Reject any release whose name
-                # doesn't carry the requested series title as a contiguous phrase.
-                if not release_matches_title(release_name, title, anchored=True):
-                    log.debug(
-                        "poll %s: skip %r — title doesn't match series %r",
-                        item_id, release_name, title,
-                    )
-                    continue
-                eks = episode_keys_from_name(release_name)
-                if not eks:
-                    continue
-                for ek in eks:
-                    # Skip Season 0 specials (S00Exx) — we only want real seasons.
-                    if ek.upper().startswith("S00"):
-                        log.debug("poll %s: skip %r — season 0 special", item_id, release_name)
-                        continue
-                    # Only queue still-needed episodes (wanted, not already queued,
-                    # not already downloaded) — never re-grab one we have or one
-                    # that's already downloading.
-                    if ek not in needed_keys:
-                        continue
-                    candidates_by_key.setdefault(ek, []).append(
-                        {**g, "parent_dir": parent_dir}
-                    )
-            else:
-                # Reject TV releases that loosely matched the movie title (e.g.
-                # "Deep Water" -> "Deep.Water.Salvage.S01..."). A movie folder
-                # should never contain a season pack or episode-numbered release,
-                # so reject any season/episode marker (bare Sxx, SxxExx, "Season N").
-                if _SEASON_OR_EP_RE.search(release_name):
-                    log.debug(
-                        "poll %s: skip %r — looks like a TV release (season/episode), not a movie",
-                        item_id, release_name,
-                    )
-                    continue
-                candidates_by_key.setdefault("movie", []).append(
-                    {**g, "parent_dir": parent_dir}
-                )
-
-        queued = 0
-        # Queue episodes oldest-first (S01E01 before S01E02, season 1 before 2).
-        # Keys are zero-padded SxxExx so a plain lexicographic sort is already
-        # chronological; the lone "movie" key is unaffected.
-        for key in sorted(candidates_by_key):
-            candidates = candidates_by_key[key]
-            if key in in_queue_keys:
-                continue  # already in the AirDC++ queue (bridge- or user-queued)
-            # Movies dedup on the completed marker (verified on disk by the
-            # fast-skip); TV relies on the live queue check above, so an episode
-            # you remove from the queue gets searched & re-grabbed next sweep.
-            if kind == "movie" and await state.is_completed(item_id, key):
-                continue
-            best = max(
-                candidates,
-                key=lambda g: score_result(
-                    g["release_name"], g["total_size"], cfg.quality, item_priority
-                ),
-            )
-            release_name: str = best["release_name"]
-            release_hub_path: str = best["parent_dir"]  # e.g. /TV/Drama/<release>
-
-            # Season layer for TV (sonarr's seasonFolderFormat is "Season.{season}"
-            # — dot, not space). Movies go straight under the movie root.
-            if kind == "tv":
-                m_season = re.match(r"S(\d{1,2})E\d", key, re.I)
-                season_num = int(m_season.group(1)) if m_season else 0
-                release_root_smb = target_base_smb + f"Season.{season_num}\\" + release_name + "\\"
-                parent_for_folder = target_base_smb + f"Season.{season_num}\\"
-            else:
-                release_root_smb = target_base_smb + release_name + "\\"
-                parent_for_folder = target_base_smb
-
-            # Whole-folder path: when the hub gave a directory result for this
-            # release, queue the entire folder by its id into the PARENT dir.
-            # AirDC++ recreates the release folder under the parent, so we pass
-            # the parent (not release_root_smb) to avoid a name/name nest.
-            if best.get("dir_id"):
-                resp = await ad.queue_result(iid, best["dir_id"], parent_for_folder)
-                if resp is not None:
-                    bid = (resp.get("bundle_info") or {}).get("id")
-                    if kind == "movie":  # TV done-ness comes from hasFile/finish, not queue time
-                        await state.mark_completed(
-                            item_id, key, str(bid) if bid else None, release_name
-                        )
-                    queued += 1
-                    log.info(
-                        "queue %s key=%s folder=%r -> %s OK (whole folder)",
-                        item_id, key, release_name, parent_for_folder,
-                    )
-                else:
-                    log.warning(
-                        "queue %s key=%s folder=%r -> failed",
-                        item_id, key, release_name,
-                    )
-                continue
-
-            # Secondary search by the full release name to capture EVERYTHING
-            # in the release folder (the broad show search only returns the
-            # top-relevance .r0X parts; sample folders + .sfv usually drop off
-            # the per-hub result limit). Then queue every file under the release
-            # path, preserving its sub-directory (Sample/, etc.) under the
-            # destination so the on-disk layout mirrors the hub layout.
-            iid2 = await ad.create_search_instance()
-            secondary_files: list[dict] = []
-            try:
-                if iid2 is not None and await ad.hub_search(iid2, release_name, extensions=None):
-                    await asyncio.sleep(8.0)
-                    rs2 = await ad.get_results(iid2, 0, 300)
-                    for r in rs2:
-                        if _is_directory_result(r):
-                            continue
-                        p = r.get("path") or ""
-                        if p.startswith(release_hub_path + _HUB_PATH_SEP) or p == release_hub_path:
-                            secondary_files.append(r)
-            finally:
-                if iid2 is not None:
-                    try:
-                        await ad.delete_instance(iid2)
-                    except Exception:
-                        pass
-
-            # If the secondary search didn't return anything (rare), fall back
-            # to the files we already grouped from the primary sweep.
-            files_to_queue = secondary_files or best["files"]
-            log.info(
-                "queue %s key=%s release=%r files=%d (primary=%d secondary=%d) root=%s",
-                item_id,
-                key,
-                release_name,
-                len(files_to_queue),
-                len(best["files"]),
-                len(secondary_files),
-                release_root_smb,
-            )
-
-            queued_files = 0
-            last_bundle_id: Optional[str] = None
-            seen_tths: set[str] = set()  # in-poll dedup vs the same TTH on multiple hubs
-            for f in files_to_queue:
-                tth = f.get("tth")
-                if not tth or tth in seen_tths:
-                    continue
-                seen_tths.add(tth)
-                # Compute the destination for this specific file: release_root +
-                # whatever sub-path the file sits at inside the release folder.
-                file_path = f.get("path") or ""
-                target_for_file = release_root_smb
-                if file_path.startswith(release_hub_path + _HUB_PATH_SEP):
-                    sub = file_path[len(release_hub_path) + 1:]
-                    sub_dir = sub.rsplit(_HUB_PATH_SEP, 1)[0] if _HUB_PATH_SEP in sub else ""
-                    if sub_dir:
-                        target_for_file = release_root_smb + sub_dir.replace(_HUB_PATH_SEP, "\\") + "\\"
-                resp = await ad.queue_result(iid, tth, target_for_file)
-                if resp is not None:
-                    queued_files += 1
-                    bi = (resp.get("bundle_info") or {}).get("id")
-                    if bi:
-                        last_bundle_id = str(bi)
-            if queued_files:
-                if kind == "movie":  # TV done-ness comes from hasFile/finish, not queue time
-                    await state.mark_completed(
-                        item_id, key, last_bundle_id, release_name
-                    )
-                queued += 1
-                log.info(
-                    "queue %s key=%s OK (%d files queued)",
-                    item_id,
-                    key,
-                    queued_files,
-                )
+        # Queue the best release per still-needed key (whole-folder when the hub
+        # gave a directory result, else file-by-file with a secondary search).
+        queued = await _queue_candidates(
+            ad, state, cfg, iid, kind, item_id,
+            candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+        )
 
         if queued:
             log.info("poll %s: queued %d new key(s) total", item_id, queued)
