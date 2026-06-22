@@ -237,7 +237,7 @@ def make_app(cfg: Config) -> FastAPI:
         try:
             ev = SonarrWebhook.model_validate(body)
         except Exception as e:
-            raise HTTPException(400, f"bad sonarr payload: {e}")
+            raise HTTPException(400, f"bad sonarr payload: {e}") from e
         await handle_sonarr_event(app, ev)
         return {"ok": True}
 
@@ -248,7 +248,7 @@ def make_app(cfg: Config) -> FastAPI:
         try:
             ev = RadarrWebhook.model_validate(body)
         except Exception as e:
-            raise HTTPException(400, f"bad radarr payload: {e}")
+            raise HTTPException(400, f"bad radarr payload: {e}") from e
         await handle_radarr_event(app, ev)
         return {"ok": True}
 

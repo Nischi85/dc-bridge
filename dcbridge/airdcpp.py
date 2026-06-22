@@ -26,7 +26,6 @@ class AirDCPP:
         self.cfg = cfg
         self.client = httpx.AsyncClient(base_url=cfg.url, timeout=30.0)
         self._token: Optional[str] = None
-        self._refresh_token: Optional[str] = None
         self._session_id: Optional[int] = None
         self._lock = asyncio.Lock()
 
@@ -41,7 +40,6 @@ class AirDCPP:
         r.raise_for_status()
         d = r.json()
         self._token = d["auth_token"]
-        self._refresh_token = d.get("refresh_token")
         self._session_id = d.get("session_id")
         self.client.headers["Authorization"] = f"Bearer {self._token}"
         log.info(
@@ -93,12 +91,6 @@ class AirDCPP:
                     await self._login()
             r = await self.client.request(method, path, **kw)
         return r
-
-    async def system_info(self) -> dict:
-        # Probe-friendly endpoint; not load-bearing. The bridge doesn't actually
-        # need system info — kept for /airdcpp/probe to show liveness.
-        r = await self._retry_on_401("GET", "/api/v1/system/away_state")
-        return {"status": r.status_code, "body": _safe_json(r)}
 
     # AirDC++ v1 search is a 3-step flow:
     #   1) POST /api/v1/search                          -> create instance, returns id
