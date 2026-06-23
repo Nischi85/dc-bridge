@@ -517,11 +517,13 @@ def _select_candidates(
         # the same-title older film. DVD/SD releases legitimately omit the year,
         # so a YEARLESS SD release is allowed; a yearless HD release, or an SD
         # release with a WRONG year, is rejected.
-        if kind == "movie" and not release_matches_year(release_name, item.get("year")):
+        if kind == "movie" and not release_matches_year(
+            release_name, item.get("year"), tolerance=cfg.match.year_tolerance
+        ):
             if not (is_sd_release(release_name) and not _YEAR_RE.search(release_name)):
                 log.debug(
-                    "poll %s: skip %r — year mismatch (want %s±1)",
-                    item_id, release_name, item.get("year"),
+                    "poll %s: skip %r — year mismatch (want %s±%s)",
+                    item_id, release_name, item.get("year"), cfg.match.year_tolerance,
                 )
                 continue
         if kind == "tv":
@@ -539,8 +541,8 @@ def _select_candidates(
             if not eks:
                 continue
             for ek in eks:
-                # Skip Season 0 specials (S00Exx) — we only want real seasons.
-                if ek.upper().startswith("S00"):
+                # Skip Season 0 specials (S00Exx) unless match.grab_specials is set.
+                if ek.upper().startswith("S00") and not cfg.match.grab_specials:
                     log.debug("poll %s: skip %r — season 0 special", item_id, release_name)
                     continue
                 # Only queue still-needed episodes (wanted, not already queued,

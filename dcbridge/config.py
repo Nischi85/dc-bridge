@@ -130,6 +130,15 @@ class FiltersCfg(BaseModel):
     reject_adult_tags: list[str] = Field(default_factory=lambda: ["XXX"])
 
 
+class MatchCfg(BaseModel):
+    """Match-correctness tuning. Most matching guards (movie title-at-start,
+    anchored TV title, movie-vs-TV reject) are deliberately NOT configurable —
+    they encode correctness, not taste, and loosening them re-opens wrong-grab
+    bugs. These two have a legitimate spread of user preference."""
+    grab_specials: bool = False   # True = also grab Season 0 (S00) specials/OVAs
+    year_tolerance: int = 1       # a movie's year must be within ±this of the request
+
+
 class Config(BaseModel):
     bridge: BridgeCfg = BridgeCfg()
     airdcpp: AirDCPPCfg
@@ -145,6 +154,7 @@ class Config(BaseModel):
     logging: LoggingCfg = LoggingCfg()
     auto_approve: AutoApproveCfg = AutoApproveCfg()
     filters: FiltersCfg = FiltersCfg()
+    match: MatchCfg = MatchCfg()
 
 
 def load_config(path: str = "/config/config.yaml") -> Config:

@@ -150,3 +150,10 @@ filters:
   # Reject adult/porn releases (whole-token). A request whose own title carries one
   # of these tags is exempt, so an adult title still matches its own releases.
   reject_adult_tags: [XXX]
+
+# Match preferences. The other matching guards (movie title-at-start, anchored TV
+# title, movie-vs-TV reject) are NOT configurable on purpose — they prevent
+# wrong-grabs; see the "What the bridge filters" section in the README.
+match:
+  grab_specials: false   # true = also grab Season 0 (S00) specials/OVAs
+  year_tolerance: 1      # a movie's year must be within ±this of the request (0 = exact)

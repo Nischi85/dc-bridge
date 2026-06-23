@@ -29,6 +29,37 @@ extract or serve files itself.
 State (tracked items, what's been grabbed, last-search times) lives in a small
 SQLite database so restarts are cheap.
 
+## What the bridge filters
+
+For each item the bridge evaluates every candidate release folder and rejects the
+ones that don't fit. Some of that is yours to tune in `config.yaml`; some is fixed
+because it's about matching *correctly*, not taste.
+
+**Configurable** (see `config.yaml.example`):
+
+- **Quality + size** — `quality.profile_name` names the Sonarr/Radarr quality
+  profile whose allowed qualities decide what to grab and in what order;
+  `quality.episode_size_mb` / `movie_size_mb` bound the total release size.
+- **Content filters** (`filters:`) — denylists for foreign-dub tags
+  (`reject_dub_tags`), foreign-subtitle languages (`reject_sub_tags`), and
+  adult/porn tags (`reject_adult_tags`). A tag you don't list is kept; an empty
+  list disables that filter. Matching is whole-token within the scene-tag block
+  after the year/episode marker, so a language word in a *title* (e.g.
+  `The.Danish.Girl`) is never mistaken for a tag.
+- **Match preferences** (`match:`) — `grab_specials` (include Season 0
+  specials/OVAs, default off) and `year_tolerance` (how far a movie's year may
+  differ from the request, default ±1).
+
+**Not configurable, on purpose** — these guards encode correctness, and loosening
+them just re-opens wrong-grab bugs, so they live in code:
+
+- A movie release must **start with** the movie title (rejects a different film
+  that merely contains the title mid-name).
+- A TV release must carry the series title as a **contiguous phrase** (the hub
+  search is a loose token match, so "Bad Judge" otherwise pulls in "Judge Judy").
+- A movie request never accepts a release carrying a **season/episode** marker
+  (that's a TV pack, not the film).
+
 ## Requirements
 
 - Docker (the examples use an unRAID host, but any Docker host works).
