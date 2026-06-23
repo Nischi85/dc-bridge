@@ -137,6 +137,11 @@ class MatchCfg(BaseModel):
     bugs. These two have a legitimate spread of user preference."""
     grab_specials: bool = False   # True = also grab Season 0 (S00) specials/OVAs
     year_tolerance: int = 1       # a movie's year must be within ±this of the request
+    # Don't search a movie until this many DAYS after its release date (digital,
+    # else physical/cinema) — the movie equivalent of poller.air_offset_hours.
+    # Scene WEB releases land around the digital date; bump this up if they tend to
+    # appear later. 0 = search from the release date. Fractions allowed (0.5 = 12h).
+    movie_release_offset_days: float = 0
 
 
 class Config(BaseModel):

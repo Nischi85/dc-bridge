@@ -420,13 +420,18 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
     """Pure scheduling decision for one item — single source of truth shared by
     poll_item (does it search this sweep?) and the schedule report (when next?).
 
-    Mirrors, in order: the TV air-date gate, then the age-based back-off. Returns
+    Mirrors, in order: the availability gate (TV air date / movie release date),
+    then the first-search-immediate rule, then the content-age back-off. Returns
     {due, status, next_due, detail}. `next_due` is the epoch the item next becomes
     eligible (None when unknown/complete). Does NOT cover the movie "already on
     disk" fast-skip (that's an async completed-table lookup, handled separately).
     """
     kind = item["kind"]
     last = int(item.get("last_searched_at") or 0)
+    # Per-kind availability gate: don't search before the content exists. TV works
+    # off Sonarr air dates (the air_offset is already baked into next_air/air_anchor
+    # at sync); movies off the release date + match.movie_release_offset_days.
+    movie_ref = 0
     if kind == "tv":
         air_anchor = item.get("air_anchor_utc")
         next_air = item.get("next_air_utc")
@@ -441,19 +446,26 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
         elif last < _iso_to_epoch(air_anchor):
             return {"due": True, "status": "aired", "next_due": now_ts,
                     "detail": f"episode aired {air_anchor}"}
+    elif kind == "movie":
+        rel = _content_ref_epoch(item)
+        if rel:
+            movie_ref = rel + int(cfg.match.movie_release_offset_days * 86400)
+            if movie_ref > now_ts:
+                return {"due": False, "status": "gated", "next_due": movie_ref,
+                        "detail": f"releases {_utc_iso(movie_ref)}"}
     # First search is always immediate: a never-searched item (just requested) gets
     # one search regardless of content-age back-off, then settles into the cadence.
-    # TV items still gated by a future air date returned above, so they're unaffected.
+    # Items gated above (unaired TV / unreleased movie) have already returned.
     if last == 0:
         return {"due": True, "status": "due", "next_due": now_ts, "detail": "first search"}
     # Content-age back-off gap (None = no applicable tier -> search every sweep).
-    # Age is measured from when the CONTENT became available (a movie's release
-    # date / a series' newest still-wanted aired episode), not when the request
-    # was created — so a freshly-requested old title backs off immediately, while
-    # a brand-new release keeps searching every sweep. Falls back to request age
-    # only when no content date is known.
+    # Age is measured from when the CONTENT became available (a movie's release date
+    # + offset / a series' newest still-wanted aired episode), not when the request
+    # was created — so a freshly-requested old title backs off immediately, while a
+    # brand-new release keeps searching every sweep. Falls back to request age only
+    # when no content date is known.
     gap = None
-    ref = _content_ref_epoch(item) or int(item.get("request_created_at") or 0)
+    ref = movie_ref or _content_ref_epoch(item) or int(item.get("request_created_at") or 0)
     if ref and cfg.poller.backoff:
         age = now_ts - ref
         applicable = [t for t in cfg.poller.backoff if age >= t.older_than_days * 86400]

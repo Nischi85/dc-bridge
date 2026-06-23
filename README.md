@@ -47,8 +47,14 @@ because it's about matching *correctly*, not taste.
   after the year/episode marker, so a language word in a *title* (e.g.
   `The.Danish.Girl`) is never mistaken for a tag.
 - **Match preferences** (`match:`) — `grab_specials` (include Season 0
-  specials/OVAs, default off) and `year_tolerance` (how far a movie's year may
-  differ from the request, default ±1).
+  specials/OVAs, default off), `year_tolerance` (how far a movie's year may
+  differ from the request, default ±1), and `movie_release_offset_days` (wait
+  this many days after a movie's release date before searching).
+
+The bridge also won't search content before it exists: a TV episode is gated
+until it airs (`poller.air_offset_hours`), and a movie until its release date
+(`match.movie_release_offset_days`). Search frequency afterward is driven by how
+old the content is, not when it was requested — see `poller.backoff`.
 
 **Not configurable, on purpose** — these guards encode correctness, and loosening
 them just re-opens wrong-grab bugs, so they live in code:

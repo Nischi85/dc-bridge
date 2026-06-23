@@ -160,3 +160,8 @@ filters:
 match:
   grab_specials: false   # true = also grab Season 0 (S00) specials/OVAs
   year_tolerance: 1      # a movie's year must be within ±this of the request (0 = exact)
+  # Don't search a movie until this many DAYS after its release date (digital, else
+  # physical/cinema) — the movie counterpart of poller.air_offset_hours. Scene WEB
+  # releases land around the digital date; raise this if they tend to appear later.
+  # 0 = search from the release date. Fractions allowed (0.5 = 12h).
+  movie_release_offset_days: 0

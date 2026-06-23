@@ -33,12 +33,14 @@ def _is_children_genre(genres: Optional[list], want: list[str]) -> bool:
 
 
 def _movie_release_date(m: dict) -> Optional[str]:
-    """Earliest known release date (ISO UTC) for content-age back-off: the soonest
-    of inCinemas/digitalRelease/physicalRelease, else <year>-01-01, else None."""
-    dates = [m.get(k) for k in ("inCinemas", "digitalRelease", "physicalRelease")]
-    dates = [d for d in dates if d]
-    if dates:
-        return min(dates)  # ISO strings sort chronologically
+    """Web/disc availability date (ISO UTC) — used for both the pre-release gate and
+    content-age back-off. Prefer digitalRelease (when WEB scene releases appear),
+    then physicalRelease, then inCinemas, then <year>-01-01; None when unknown.
+    Deliberately NOT the earliest date: a film that left cinemas months ago but just
+    hit digital should count as freshly available, not old."""
+    for k in ("digitalRelease", "physicalRelease", "inCinemas"):
+        if m.get(k):
+            return m[k]
     y = m.get("year")
     return f"{int(y)}-01-01T00:00:00Z" if y else None
 
