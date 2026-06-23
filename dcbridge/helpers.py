@@ -441,6 +441,11 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
         elif last < _iso_to_epoch(air_anchor):
             return {"due": True, "status": "aired", "next_due": now_ts,
                     "detail": f"episode aired {air_anchor}"}
+    # First search is always immediate: a never-searched item (just requested) gets
+    # one search regardless of content-age back-off, then settles into the cadence.
+    # TV items still gated by a future air date returned above, so they're unaffected.
+    if last == 0:
+        return {"due": True, "status": "due", "next_due": now_ts, "detail": "first search"}
     # Content-age back-off gap (None = no applicable tier -> search every sweep).
     # Age is measured from when the CONTENT became available (a movie's release
     # date / a series' newest still-wanted aired episode), not when the request
