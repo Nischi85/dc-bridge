@@ -32,6 +32,23 @@ def _is_children_genre(genres: Optional[list], want: list[str]) -> bool:
     return any(w.lower() in g for w in want)
 
 
+def _named_profile_priority(profile_name: str, by_name: dict, app: str) -> Optional[list]:
+    """Resolve quality.profile_name to its priority list. None means 'not using a
+    named profile' — fall back to each item's own assigned profile. Warns (once per
+    sync) if a name is set but absent in this app."""
+    if not profile_name:
+        return None
+    prio = by_name.get(profile_name)
+    if prio is None:
+        log.warning(
+            "%s sync: quality.profile_name %r not found (have %s); "
+            "falling back to each item's assigned profile",
+            app, profile_name, sorted(n for n in by_name if n),
+        )
+        return None
+    return prio
+
+
 async def route_children_movie(
     url: str, h: dict, http: httpx.AsyncClient, cr: ChildrenRoutingCfg, movie: dict
 ) -> Optional[str]:
@@ -115,7 +132,8 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
     r = await http.get(f"{url}/api/v3/series", headers=h)
     r.raise_for_status()
     series_list = r.json()
-    profiles_by_id = await _fetch_quality_profiles(url, h, http)
+    profiles_by_id, profiles_by_name = await _fetch_quality_profiles(url, h, http)
+    named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "sonarr")
     added = 0
     skipped = 0
     pre_completed = 0
@@ -189,7 +207,9 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
         await state.set_tv_air(f"sonarr:{sid}", air_anchor, next_air)
         await state.set_monitored_keys(f"sonarr:{sid}", wanted_keys)
         await state.set_quality_priority(
-            f"sonarr:{sid}", profiles_by_id.get(s.get("qualityProfileId")) or []
+            f"sonarr:{sid}",
+            named_priority if named_priority is not None
+            else (profiles_by_id.get(s.get("qualityProfileId")) or []),
         )
     log.info(
         "sonarr sync: %d series tracked, %d skipped, %d episodes pre-marked completed",
@@ -212,7 +232,8 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
     r = await http.get(f"{url}/api/v3/movie", headers=h)
     r.raise_for_status()
     movies = r.json()
-    profiles_by_id = await _fetch_quality_profiles(url, h, http)
+    profiles_by_id, profiles_by_name = await _fetch_quality_profiles(url, h, http)
+    named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "radarr")
     added = 0
     skipped = 0
     pre_completed = 0
@@ -247,7 +268,9 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             year=m.get("year"),
         )
         await state.set_quality_priority(
-            f"radarr:{mid}", profiles_by_id.get(m.get("qualityProfileId")) or []
+            f"radarr:{mid}",
+            named_priority if named_priority is not None
+            else (profiles_by_id.get(m.get("qualityProfileId")) or []),
         )
         added += 1
         if m.get("hasFile"):

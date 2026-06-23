@@ -48,6 +48,12 @@ class PathTranslate(BaseModel):
 
 
 class QualityCfg(BaseModel):
+    # Name of the Sonarr/Radarr quality profile (same name in both apps, e.g.
+    # "DC Single") that decides which qualities to grab and in what order. The
+    # bridge looks it up by name and uses its allowed qualities (most-preferred
+    # first) for ALL items, so you swap quality by editing one value. Empty =
+    # use whatever profile each item is individually assigned in *arr.
+    profile_name: str = ""
     # Ordered source+resolution preference, e.g. ["WEB 720p", "WEB 1080p", ...].
     # A release is accepted iff it matches at least one entry (all of the entry's
     # space-separated tokens present, case-insensitive substrings) and the
@@ -119,6 +125,9 @@ class FiltersCfg(BaseModel):
     # Subtitle-language stems to reject on English-audio releases; each matches
     # "<stem>sub"/"<stem>subs" with an optional dot (DK -> DKsubs, DK.SUBS).
     reject_sub_tags: list[str] = Field(default_factory=lambda: ["DK", "DANiSH"])
+    # Adult/porn scene tags to reject (whole-token). A request whose own title
+    # carries one of these tags is exempt so its releases still match.
+    reject_adult_tags: list[str] = Field(default_factory=lambda: ["XXX"])
 
 
 class Config(BaseModel):

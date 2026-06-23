@@ -119,16 +119,22 @@ def profile_to_priority(profile: dict) -> list[str]:
     return specs
 
 
-async def _fetch_quality_profiles(url: str, headers: dict, http: httpx.AsyncClient) -> dict:
-    """{profileId: ['web 720p', ...]} for a Sonarr/Radarr instance. Empty on error
-    so the bridge falls back to the config quality rules."""
+async def _fetch_quality_profiles(
+    url: str, headers: dict, http: httpx.AsyncClient
+) -> tuple[dict, dict]:
+    """(by_id, by_name) maps of profileId / profile-name -> ['web 720p', ...] for a
+    Sonarr/Radarr instance. Both empty on error so the bridge falls back to the
+    config quality rules. by_name lets the bridge resolve quality.profile_name."""
     try:
         r = await http.get(f"{url}/api/v3/qualityprofile", headers=headers)
         if r.status_code == 200:
-            return {p["id"]: profile_to_priority(p) for p in r.json()}
+            profiles = r.json()
+            by_id = {p["id"]: profile_to_priority(p) for p in profiles}
+            by_name = {p.get("name"): profile_to_priority(p) for p in profiles}
+            return by_id, by_name
     except Exception as e:
         log.debug("could not fetch quality profiles from %s: %s", url, e)
-    return {}
+    return {}, {}
 
 
 def _priority_rank(name_l: str, priority: list[str]) -> Optional[int]:
@@ -210,6 +216,8 @@ _DEFAULT_DUB_TAGS = [
 # Subtitle stems: each matches '<stem>sub'/'<stem>subs' with an optional dot, e.g.
 # DK -> DKsubs / DK.SUBS, as in 'Deep.Water.2026.Custom.DKsubs.1080p.WEB-DL...'.
 _DEFAULT_SUB_TAGS = ["DK", "DANiSH"]
+# Adult/porn scene tags (whole-token), e.g. 'Roccos.World...XXX'.
+_DEFAULT_ADULT_TAGS = ["XXX"]
 
 _NEVER_RE = re.compile(r"(?!)")  # matches nothing — used when a denylist is empty
 
@@ -230,14 +238,22 @@ def compile_subs_re(stems: list[str]) -> re.Pattern[str]:
 
 _FOREIGN_LANG_RE = compile_dub_re(_DEFAULT_DUB_TAGS)
 _FOREIGN_SUBS_RE = compile_subs_re(_DEFAULT_SUB_TAGS)
+_ADULT_TAGS = list(_DEFAULT_ADULT_TAGS)        # raw tags, for the title-exemption check
+_ADULT_RE = compile_dub_re(_DEFAULT_ADULT_TAGS)  # whole-token match in the release name
 
 
-def configure_filters(reject_dub_tags: list[str], reject_sub_tags: list[str]) -> None:
-    """Recompile the dub/subtitle denylists from config. Called once at startup;
-    when the `filters` block is omitted the module defaults stay in effect."""
-    global _FOREIGN_LANG_RE, _FOREIGN_SUBS_RE
+def configure_filters(
+    reject_dub_tags: list[str],
+    reject_sub_tags: list[str],
+    reject_adult_tags: list[str],
+) -> None:
+    """Recompile the dub/subtitle/adult denylists from config. Called once at
+    startup; when the `filters` block is omitted the module defaults stay in effect."""
+    global _FOREIGN_LANG_RE, _FOREIGN_SUBS_RE, _ADULT_TAGS, _ADULT_RE
     _FOREIGN_LANG_RE = compile_dub_re(reject_dub_tags)
     _FOREIGN_SUBS_RE = compile_subs_re(reject_sub_tags)
+    _ADULT_TAGS = list(reject_adult_tags)
+    _ADULT_RE = compile_dub_re(reject_adult_tags)
 
 
 def _scene_tag_region(name: str) -> str:
@@ -339,12 +355,13 @@ def release_starts_with_title(release_name: str, title: str) -> bool:
 
 
 def is_adult_release(name: str, title: str) -> bool:
-    """Reject scene-tagged adult content (XXX) for a non-adult request — scene
-    porn is reliably tagged 'XXX'. The rare adult-named title (e.g. 'xXx') is
-    exempt so its own releases still match."""
-    if "xxx" in title.lower():
+    """Reject scene-tagged adult content (tags from filters.reject_adult_tags,
+    default XXX) for a non-adult request. A request whose own title carries an
+    adult tag (e.g. 'xXx') is exempt so its own releases still match."""
+    tl = title.lower()
+    if any(t.lower() in tl for t in _ADULT_TAGS):
         return False
-    return re.search(r"\bxxx\b", name, re.I) is not None
+    return _ADULT_RE.search(name) is not None
 
 
 # Air dates from Sonarr arrive as e.g. "2026-06-01T01:00:00Z". This sentinel is

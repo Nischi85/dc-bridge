@@ -47,35 +47,24 @@ path_translate:
   - arr_prefix: /share
     fs_prefix: /mnt/user/media/verified
 
-# (Optional) per-kind library root hints — currently unused by the event handlers
-# but kept for documentation/future filtering. Webhook path is the source of truth.
-root_folders:
-  tv:
-    arr_path: /share/TV
-    fs_path: /mnt/user/media/verified/TV
-  movies:
-    arr_path: /share/Movies
-    fs_path: /mnt/user/media/verified/Movies
-
 # Match + dedup behavior. Once an episode/movie key is queued, the bridge never
 # queues another release for the same key, regardless of later/better matches.
 quality:
-  # PRIMARY: which qualities to grab and in what order is taken from each item's
-  # Sonarr/Radarr QUALITY PROFILE (the bridge reads /api/v3/qualityprofile and
-  # uses the profile's allowed qualities, most-preferred first — source+resolution,
-  # e.g. WEB 720p before WEB 1080p before BluRay 1080p). Manage it in the *arr UI.
-  #
-  # The keys below are a FALLBACK, used only when a profile can't be read.
-  # Optional `priority` overrides everything with an explicit ordered list of
-  # "<source> <resolution>" specs (source matches a substring: WEB/HDTV/BluRay/DVD):
-  #   priority: [WEB 720p, WEB 1080p, HDTV 720p, HDTV 1080p, BluRay 720p, BluRay 1080p]
+  # PRIMARY: name a Sonarr/Radarr QUALITY PROFILE (same name in both apps) and the
+  # bridge uses its allowed qualities, most-preferred first (source+resolution, e.g.
+  # WEB 720p before WEB 1080p before BluRay 1080p). Manage which qualities in the
+  # *arr UI; swap which profile here. Empty -> use each item's own assigned profile.
+  profile_name: "DC Single"
+  # FALLBACK, used only if the named profile can't be read (e.g. *arr API down).
+  # `priority` is an explicit ordered list of "<source> <resolution>" specs (source
+  # matches a substring: WEB/HDTV/BluRay/DVD); accepted_keywords + resolutions are
+  # the older keyword/resolution pair used when `priority` is empty too.
   priority: []
-  # Legacy fallback (used when neither a profile nor `priority` is available):
   accepted_keywords: [WEB, WEB-DL, BluRay, HDTV, WEBRip]
   resolutions: [1080p, 720p]  # accepted resolutions, in preference order
   # These bounds are checked against the *total release size* (sum of all files
   # in the hub release folder), not per-file. Multi-volume RAR releases of one
-  # TV episode are typically 1.5–4 GB total.
+  # TV episode are typically 1.5–4 GB total. Always applied, on top of the profile.
   episode_size_mb: [200, 12000]
   movie_size_mb: [1000, 30000]
 
@@ -158,3 +147,6 @@ filters:
   # Reject English-audio releases muxed with subs in these languages. Each stem
   # matches "<stem>sub"/"<stem>subs" with an optional dot, e.g. DK -> DKsubs / DK.SUBS.
   reject_sub_tags: [DK, DANiSH]
+  # Reject adult/porn releases (whole-token). A request whose own title carries one
+  # of these tags is exempt, so an adult title still matches its own releases.
+  reject_adult_tags: [XXX]
