@@ -52,6 +52,7 @@ class State:
             ("next_air_utc",        "ALTER TABLE tracked_items ADD COLUMN next_air_utc TEXT"),
             ("jellyseerr_media_id", "ALTER TABLE tracked_items ADD COLUMN jellyseerr_media_id INTEGER"),
             ("quality_priority",    "ALTER TABLE tracked_items ADD COLUMN quality_priority TEXT"),
+            ("release_date_utc",    "ALTER TABLE tracked_items ADD COLUMN release_date_utc TEXT"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -100,7 +101,7 @@ class State:
             cur = self.conn.execute(
                 "SELECT id, kind, title, target_dir_fs, monitored_keys, request_status,"
                 " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
-                " jellyseerr_media_id, quality_priority FROM tracked_items"
+                " jellyseerr_media_id, quality_priority, release_date_utc FROM tracked_items"
             )
             return [
                 {
@@ -117,6 +118,7 @@ class State:
                     "next_air_utc": r[10],
                     "jellyseerr_media_id": r[11],
                     "quality_priority": json.loads(r[12]) if r[12] else [],
+                    "release_date_utc": r[13],
                 }
                 for r in cur.fetchall()
             ]
@@ -126,6 +128,15 @@ class State:
             self.conn.execute(
                 "UPDATE tracked_items SET request_created_at = ? WHERE id = ?",
                 (ts, item_id),
+            )
+            self.conn.commit()
+
+    async def set_release_date(self, item_id: str, release_date_utc: str | None) -> None:
+        """Stamp a movie's release date (ISO UTC) for content-age back-off."""
+        async with self._lock:
+            self.conn.execute(
+                "UPDATE tracked_items SET release_date_utc = ? WHERE id = ?",
+                (release_date_utc, item_id),
             )
             self.conn.commit()
 

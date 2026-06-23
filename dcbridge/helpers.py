@@ -401,6 +401,21 @@ def _fmt_dur(secs: int) -> str:
     return f"{m}m"
 
 
+def _content_ref_epoch(item: dict) -> int:
+    """Epoch the item's content became available, for content-age back-off:
+    a movie's release date (real Radarr date, else its year as Jan 1), or a TV
+    series' newest still-wanted aired episode. 0 when unknown (the caller then
+    falls back to request-created age)."""
+    if item.get("kind") == "tv":
+        anchor = item.get("air_anchor_utc")
+        return _iso_to_epoch(anchor) if anchor else 0
+    rd = item.get("release_date_utc")
+    if rd:
+        return _iso_to_epoch(rd)
+    year = item.get("year")
+    return _iso_to_epoch(f"{int(year)}-01-01T00:00:00Z") if year else 0
+
+
 def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
     """Pure scheduling decision for one item — single source of truth shared by
     poll_item (does it search this sweep?) and the schedule report (when next?).
@@ -426,11 +441,16 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
         elif last < _iso_to_epoch(air_anchor):
             return {"due": True, "status": "aired", "next_due": now_ts,
                     "detail": f"episode aired {air_anchor}"}
-    # Request-age back-off gap (None = no applicable tier -> search every sweep).
+    # Content-age back-off gap (None = no applicable tier -> search every sweep).
+    # Age is measured from when the CONTENT became available (a movie's release
+    # date / a series' newest still-wanted aired episode), not when the request
+    # was created — so a freshly-requested old title backs off immediately, while
+    # a brand-new release keeps searching every sweep. Falls back to request age
+    # only when no content date is known.
     gap = None
-    created_at = item.get("request_created_at")
-    if created_at and cfg.poller.backoff:
-        age = now_ts - int(created_at)
+    ref = _content_ref_epoch(item) or int(item.get("request_created_at") or 0)
+    if ref and cfg.poller.backoff:
+        age = now_ts - ref
         applicable = [t for t in cfg.poller.backoff if age >= t.older_than_days * 86400]
         if applicable:
             gap = max(applicable, key=lambda t: t.older_than_days).search_every_seconds

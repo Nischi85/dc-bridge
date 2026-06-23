@@ -32,6 +32,17 @@ def _is_children_genre(genres: Optional[list], want: list[str]) -> bool:
     return any(w.lower() in g for w in want)
 
 
+def _movie_release_date(m: dict) -> Optional[str]:
+    """Earliest known release date (ISO UTC) for content-age back-off: the soonest
+    of inCinemas/digitalRelease/physicalRelease, else <year>-01-01, else None."""
+    dates = [m.get(k) for k in ("inCinemas", "digitalRelease", "physicalRelease")]
+    dates = [d for d in dates if d]
+    if dates:
+        return min(dates)  # ISO strings sort chronologically
+    y = m.get("year")
+    return f"{int(y)}-01-01T00:00:00Z" if y else None
+
+
 def _named_profile_priority(profile_name: str, by_name: dict, app: str) -> Optional[list]:
     """Resolve quality.profile_name to its priority list. None means 'not using a
     named profile' — fall back to each item's own assigned profile. Warns (once per
@@ -272,6 +283,7 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             named_priority if named_priority is not None
             else (profiles_by_id.get(m.get("qualityProfileId")) or []),
         )
+        await state.set_release_date(f"radarr:{mid}", _movie_release_date(m))
         added += 1
         if m.get("hasFile"):
             await state.mark_completed(

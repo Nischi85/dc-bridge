@@ -84,10 +84,13 @@ poller:
   # every sweep.
   fresh_episode_hours: 48
   fresh_episode_every_seconds: 7200  # every 2h
-  # Age-based back-off. Older Jellyseerr requests are searched less often. The
-  # poller picks the LAST tier whose `older_than_days` matches; items younger
-  # than every tier search every sweep (no back-off). An empty list disables
-  # back-off entirely. Edit this list freely — order tiers small -> large age.
+  # Content-age back-off. Older CONTENT is searched less often, where age is
+  # measured from when the title became available — a movie's release date, or a
+  # series' newest still-wanted aired episode — NOT when it was requested. So a
+  # freshly-requested 3-year-old movie backs off immediately, while a brand-new
+  # release keeps searching every sweep. The poller picks the LAST tier whose
+  # `older_than_days` matches; content younger than every tier searches every
+  # sweep. An empty list disables back-off. Order tiers small -> large age.
   backoff:
     - older_than_days: 1         # 1–7 d old: once per day
       search_every_seconds: 86400
