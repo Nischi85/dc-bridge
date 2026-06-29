@@ -79,6 +79,12 @@ class PollerCfg(BaseModel):
     fresh_episode_hours: float = 48          # TV: an episode aired within this window
     fresh_episode_every_seconds: int = 7200  # is searched at most this gap apart (caps back-off)
     backoff: list[BackoffTier] = Field(default_factory=list)
+    # When False (default), an episode/movie that was once fulfilled is NOT
+    # re-downloaded if its file is later deleted — the completion marker keeps it
+    # out of the search set. Set True for *arr-style behaviour: always re-grab a
+    # monitored item whose file is missing. A deliberate Jellyseerr re-request
+    # always re-fetches regardless of this setting.
+    refetch_deleted: bool = False
 
 
 class AutoSyncCfg(BaseModel):

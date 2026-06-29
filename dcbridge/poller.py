@@ -114,6 +114,15 @@ async def react_to_jellyseerr(app: FastAPI) -> None:
             rc = item.get("request_created_at")
             ls = item.get("last_searched_at")
             if rc and (ls is None or ls < rc):
+                # Re-request override: a deliberate fresh request should bring back
+                # even parts that were once fulfilled and later deleted. Drop the
+                # completion markers that predate this request so the missing pieces
+                # re-enter the search set; still-present files get re-marked on the
+                # next *arr sync. (No-op when refetch_deleted is on — nothing held.)
+                if not cfg.poller.refetch_deleted:
+                    for _k, _rel, _qat in await state.get_completed_keys(item["id"]):
+                        if _qat < rc:
+                            await state.clear_completed(item["id"], _k)
                 log.info(
                     "jellyseerr react: searching freshly-requested %s (%s)",
                     item["id"], item.get("title"),
@@ -591,7 +600,10 @@ async def _queue_candidates(
         # Movies dedup on the completed marker (verified on disk by the
         # fast-skip); TV relies on the live queue check above, so an episode
         # you remove from the queue gets searched & re-grabbed next sweep.
-        if kind == "movie" and await state.is_completed(item_id, key):
+        # refetch_deleted off (default) also keeps a deleted-after-fulfilment
+        # movie from being re-grabbed; on = *arr-style always re-fetch.
+        if kind == "movie" and not cfg.poller.refetch_deleted \
+                and await state.is_completed(item_id, key):
             continue
         best = max(
             candidates,
@@ -836,7 +848,12 @@ async def poll_item(
         # Still needed = wanted, minus what's already in the queue, minus what we
         # already have (completed markers / Sonarr hasFile). This is what we search
         # for and queue; removing a queued (un-finished) episode brings it back.
-        done = {k for k, _, _ in await state.get_completed_keys(item_id)}
+        # With refetch_deleted off (default), the completed markers also keep a
+        # once-fulfilled-then-deleted episode from being re-grabbed; turning it on
+        # restores *arr-style "always re-fetch missing monitored episodes".
+        done = set() if cfg.poller.refetch_deleted else {
+            k for k, _, _ in await state.get_completed_keys(item_id)
+        }
         needed_keys = wanted - in_queue_keys - done
 
     now_ts = int(time.time())

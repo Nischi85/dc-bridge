@@ -79,6 +79,12 @@ poller:
   # disk (verified via AirDC++). If it never lands / stays a partial for longer
   # than this many hours, the bridge assumes the grab stalled and re-searches it.
   download_grace_hours: 24
+  # Re-download behaviour for items deleted AFTER they were once fulfilled.
+  # false (default): a fulfilled episode/movie is NOT re-grabbed if you later
+  #   delete its file — it stays gone until you deliberately re-request it in
+  #   Jellyseerr (a re-request always re-fetches).
+  # true: *arr-style — any monitored item whose file is missing is re-downloaded.
+  refetch_deleted: false
   # TV: an episode that aired within this window is searched at the fresh cadence
   # below, capping (never slowing) the age back-off. New requests still search
   # every sweep.
