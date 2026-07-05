@@ -890,57 +890,84 @@ async def poll_item(
         log.info("poll %s: sanitized query %r -> %r", item_id, title, query)
     log.info("poll %s [%s] q=%r target=%s", item_id, kind, query, target_base_smb)
 
-    iid = await ad.create_search_instance()
-    if iid is None:
-        return False
     # Stamp the search time as early as we know we're committing to one — this
     # keeps the back-off honest even if the hub_search itself fails downstream.
     await state.set_last_searched_at(item_id, now_ts)
-    try:
-        if kind == "tv":
-            # Per-episode targeted searches into one instance. A broad "<series>"
-            # query hits per-source result caps that hide higher episodes (a
-            # source returns only its first ~9 hits, e.g. S01E01-09), so search
-            # each still-needed episode specifically to surface its release. Only
-            # the not-yet-queued wanted episodes are searched (queue-aware), so it
-            # self-limits to a small burst that shrinks as episodes get grabbed.
-            for ek in sorted(needed_keys):
-                await ad.hub_search(iid, f"{query} {ek}")
-            # Results stream in per source; give slower sources time to answer.
-            await asyncio.sleep(min(30.0, 10.0 + 2.0 * len(needed_keys)))
-        else:
+    queued = 0
+    if kind == "tv":
+        # Per-episode search, each in its OWN instance. Firing multiple searches
+        # into one shared instance clobbers earlier ones (AirDC++ keeps only the
+        # last query's results — and only its tth is queueable), which is why a
+        # broad/batched search grabbed only the highest episode. AirDC++ also
+        # throttles rapid searches, so we settle for results after each search and
+        # pause before the next. Only still-needed (wanted, un-queued) episodes are
+        # searched, capped per poll; any remainder is picked up on the next sweep.
+        eks = sorted(needed_keys)
+        cap = max(1, cfg.poller.tv_max_search_per_poll)
+        deferred = eks[cap:]
+        if deferred:
+            log.info("poll %s: %d episode(s) this poll, %d deferred to next sweep: %s",
+                     item_id, cap, len(deferred), ",".join(deferred))
+        batch = eks[:cap]
+        total_results = 0
+        for idx, ek in enumerate(batch):
+            ep_iid = await ad.create_search_instance()
+            if ep_iid is None:
+                continue
+            try:
+                if not await ad.hub_search(ep_iid, f"{query} {ek}"):
+                    continue
+                await asyncio.sleep(cfg.poller.tv_search_settle_seconds)
+                results = await ad.get_results(ep_iid, 0, 500)
+                total_results += len(results)
+                candidates_by_key = _select_candidates(
+                    results, kind, title, item, cfg, item_priority, {ek}, item_id
+                )
+                queued += await _queue_candidates(
+                    ad, state, cfg, ep_iid, kind, item_id,
+                    candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+                )
+            finally:
+                try:
+                    await ad.delete_instance(ep_iid)
+                except Exception:
+                    log.debug("delete_instance %s failed (ignored)", ep_iid)
+            # Space out searches so AirDC++'s throttle doesn't drop the next one.
+            if idx < len(batch) - 1:
+                await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
+        log.info("poll %s: searched %d episode(s), %d hub result(s), queued %d",
+                 item_id, len(batch), total_results, queued)
+    else:
+        iid = await ad.create_search_instance()
+        if iid is None:
+            return False
+        try:
             if not await ad.hub_search(iid, query, extensions=None):
                 return True
             await asyncio.sleep(8.0)
-        results = await ad.get_results(iid, 0, 500)
-        log.info("poll %s: %d hub result(s)", item_id, len(results))
+            results = await ad.get_results(iid, 0, 500)
+            log.info("poll %s: %d hub result(s)", item_id, len(results))
+            candidates_by_key = _select_candidates(
+                results, kind, title, item, cfg, item_priority, needed_keys, item_id
+            )
+            queued = await _queue_candidates(
+                ad, state, cfg, iid, kind, item_id,
+                candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+            )
+        finally:
+            try:
+                await ad.delete_instance(iid)
+            except Exception:
+                log.debug("delete_instance %s failed (ignored)", iid)
 
-        # Group the raw hits into release folders and run the accept/reject
-        # guards (quality / adult / language / subs / title / year / season).
-        candidates_by_key = _select_candidates(
-            results, kind, title, item, cfg, item_priority, needed_keys, item_id
-        )
-
-        # Queue the best release per still-needed key (whole-folder when the hub
-        # gave a directory result, else file-by-file with a secondary search).
-        queued = await _queue_candidates(
-            ad, state, cfg, iid, kind, item_id,
-            candidates_by_key, in_queue_keys, target_base_smb, item_priority,
-        )
-
-        if queued:
-            log.info("poll %s: queued %d new key(s) total", item_id, queued)
-            # If a queued release already exists on disk, AirDC++ instant-completes
-            # it without leaving a bundle to catch — so nudge a targeted *arr rescan
-            # so it imports them (hasFile=true) and they leave the wanted set,
-            # instead of being re-queued every sweep.
-            if kind == "tv":
-                await trigger_arr_rescan(cfg, item_id)
-    finally:
-        try:
-            await ad.delete_instance(iid)
-        except Exception:
-            log.debug("delete_instance %s failed (ignored)", iid)
+    if queued:
+        log.info("poll %s: queued %d new key(s) total", item_id, queued)
+        # If a queued release already exists on disk, AirDC++ instant-completes
+        # it without leaving a bundle to catch — so nudge a targeted *arr rescan
+        # so it imports them (hasFile=true) and they leave the wanted set,
+        # instead of being re-queued every sweep.
+        if kind == "tv":
+            await trigger_arr_rescan(cfg, item_id)
 
     # We issued an AirDC++ search round-trip for this item; the poller uses this
     # to spend its inter-search jitter only on real searches.

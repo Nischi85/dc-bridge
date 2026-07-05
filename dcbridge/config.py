@@ -78,6 +78,15 @@ class PollerCfg(BaseModel):
     download_grace_hours: float = 24  # how long a queued grab may take before it's deemed stalled
     fresh_episode_hours: float = 48          # TV: an episode aired within this window
     fresh_episode_every_seconds: int = 7200  # is searched at most this gap apart (caps back-off)
+    # TV search pacing. Each still-needed episode is searched in its OWN AirDC++
+    # instance (searches into a shared instance clobber each other — only the last
+    # survives). AirDC++ also throttles rapid searches, so consecutive episode
+    # searches are spaced out. settle = wait for results after firing a search;
+    # gap = extra pause before the next episode's search; max_per_poll bounds how
+    # many episodes one poll searches (the rest are picked up next sweep).
+    tv_search_settle_seconds: float = 15.0
+    tv_search_gap_seconds: float = 15.0
+    tv_max_search_per_poll: int = 8
     backoff: list[BackoffTier] = Field(default_factory=list)
     # When False (default), an episode/movie that was once fulfilled is NOT
     # re-downloaded if its file is later deleted — the completion marker keeps it

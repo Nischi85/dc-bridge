@@ -90,6 +90,13 @@ poller:
   # every sweep.
   fresh_episode_hours: 48
   fresh_episode_every_seconds: 7200  # every 2h
+  # TV search pacing. Each still-needed episode is searched in its OWN AirDC++
+  # instance — searches into a shared instance overwrite each other, so a batched
+  # search would grab only the last episode. AirDC++ also throttles rapid
+  # searches, so consecutive episode searches are spaced out.
+  tv_search_settle_seconds: 15   # wait for hub results after firing each search
+  tv_search_gap_seconds: 15      # extra pause before the next episode's search
+  tv_max_search_per_poll: 8      # episodes searched per poll; rest picked up next sweep
   # Content-age back-off. Older CONTENT is searched less often, where age is
   # measured from when the title became available — a movie's release date, or a
   # series' newest still-wanted aired episode — NOT when it was requested. So a
