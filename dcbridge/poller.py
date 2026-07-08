@@ -331,14 +331,51 @@ async def poller_loop(app: FastAPI) -> None:
     while True:
         try:
             items = await state.list_items()
+            now_ts = int(time.time())
             # With the Jellyseerr filter active, only items carrying an active
             # request are relevant. Drop everything else from the worklist so it
             # is neither walked nor allowed to delay the items that matter.
             if cfg.jellyseerr.url and cfg.jellyseerr.api_key:
                 active = set(cfg.jellyseerr.active_statuses)
-                items = [it for it in items if it.get("request_status") in active]
+                kept = [it for it in items if it.get("request_status") in active]
+                # Completion follow-up must outlive the request status: a movie
+                # whose grab landed but which *arr never imported would otherwise
+                # be dropped here the moment its request leaves `processing`,
+                # stranding the release on disk forever (no reconcile, no rescan).
+                # Re-admit inactive movies whose completed grab is still on disk
+                # but unimported, so poll_item's completion path keeps firing
+                # until the import sticks. Once *arr confirms the import we stamp
+                # an `import_verified` marker so the steady state costs nothing.
+                # Files deleted after fulfilment stay excluded (completion is not
+                # 'complete'), preserving refetch_deleted=false semantics.
+                kept_ids = {it["id"] for it in kept}
+                for it in items:
+                    if it["id"] in kept_ids or it["kind"] != "movie":
+                        continue
+                    marker = await state.get_completed(it["id"], "movie")
+                    if marker is None or marker[0] == "(pre-existing)":
+                        continue
+                    if await state.is_completed(it["id"], "import_verified"):
+                        continue
+                    imported = await arr_has_imported(cfg, it)
+                    if imported is True:
+                        await state.mark_completed(
+                            it["id"], "import_verified", None, "(verified)"
+                        )
+                        continue
+                    if imported is None:
+                        continue  # *arr unreachable; retry next sweep
+                    comp = await movie_completion(
+                        ad, cfg, it, marker[0], marker[1], now_ts
+                    )
+                    if comp == "complete":
+                        log.info(
+                            "completion follow-up: %s (%s) landed but not imported"
+                            " — re-admitting to worklist", it["id"], it.get("title"),
+                        )
+                        kept.append(it)
+                items = kept
             log.info("poller sweep: %d item(s) to search", len(items))
-            now_ts = int(time.time())
             # One disk probe per movie for the whole sweep, shared by the schedule
             # report and every poll_item, instead of each re-probing the same movie.
             completion = await build_completion_cache(ad, cfg, state, items, now_ts)
