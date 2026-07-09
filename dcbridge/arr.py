@@ -544,6 +544,34 @@ async def arr_has_imported(
     return None
 
 
+async def sonarr_monitored_missing_keys(cfg: Config, sid: str) -> Optional[set[str]]:
+    """All monitored, file-less episode keys of a series — REGARDLESS of air date
+    (season 0 specials excluded). Backs the initial probe search of a fresh
+    request: the synced monitored_keys only carry aired episodes, so a fully
+    unaired series would otherwise have nothing to search for. None on any error."""
+    if not cfg.sonarr.api_key or not sid.isdigit():
+        return None
+    base = cfg.sonarr.url.rstrip("/")
+    try:
+        async with http_session() as http:
+            r = await http.get(
+                f"{base}/api/v3/episode",
+                params={"seriesId": sid},
+                headers={"X-Api-Key": cfg.sonarr.api_key},
+            )
+        if r.status_code != 200:
+            return None
+        return {
+            f"S{int(e.get('seasonNumber', 0)):02d}E{int(e.get('episodeNumber', 0)):02d}"
+            for e in r.json()
+            if e.get("monitored") and not e.get("hasFile")
+            and int(e.get("seasonNumber", 0)) != 0
+        }
+    except Exception as e:
+        log.warning("sonarr_monitored_missing_keys %s failed: %s", sid, e)
+        return None
+
+
 async def mark_jellyseerr_available(cfg: Config, item_id: str, media_id: Optional[int]) -> bool:
     """Flip a Jellyseerr media to 'available' (status 5) — the bridge drops scene
     folders Radarr never imports, so Jellyseerr would otherwise sit on 'processing'

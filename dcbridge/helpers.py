@@ -428,6 +428,14 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
     """
     kind = item["kind"]
     last = int(item.get("last_searched_at") or 0)
+    # A fresh request (never searched, or a deliberate re-request newer than the
+    # last search) always gets ONE immediate probe search — even before the
+    # release/air date. Early hub availability and wrong metadata dates happen;
+    # after the probe stamps last_searched_at, the normal gate/back-off resumes.
+    rc = int(item.get("request_created_at") or 0)
+    initial = last == 0 or (rc and last < rc)
+    _initial_due = {"due": True, "status": "initial", "next_due": now_ts,
+                    "detail": "first search on fresh request"}
     # Per-kind availability gate: don't search before the content exists. TV works
     # off Sonarr air dates (the air_offset is already baked into next_air/air_anchor
     # at sync); movies off the release date + match.movie_release_offset_days.
@@ -437,9 +445,13 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
         next_air = item.get("next_air_utc")
         if not air_anchor:
             if not next_air:
+                # Nothing wanted and nothing upcoming: never probe a complete
+                # series (force-available flow also keys on this status).
                 return {"due": False, "status": "complete", "next_due": None,
                         "detail": "no episode wanted"}
             if next_air > _utc_iso(now_ts):
+                if initial:
+                    return _initial_due
                 return {"due": False, "status": "gated", "next_due": _iso_to_epoch(next_air),
                         "detail": f"airs+offset {next_air}"}
             # next_air already passed (just aired) -> fall through to back-off
@@ -451,12 +463,13 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
         if rel:
             movie_ref = rel + int(cfg.match.movie_release_offset_days * 86400)
             if movie_ref > now_ts:
+                if initial:
+                    return _initial_due
                 return {"due": False, "status": "gated", "next_due": movie_ref,
                         "detail": f"releases {_utc_iso(movie_ref)}"}
-    # First search is always immediate: a never-searched item (just requested) gets
+    # First search is always immediate: a fresh request (see `initial` above) gets
     # one search regardless of content-age back-off, then settles into the cadence.
-    # Items gated above (unaired TV / unreleased movie) have already returned.
-    if last == 0:
+    if initial:
         return {"due": True, "status": "due", "next_due": now_ts, "detail": "first search"}
     # Content-age back-off gap (None = no applicable tier -> search every sweep).
     # Age is measured from when the CONTENT became available (a movie's release date

@@ -58,6 +58,7 @@ from dcbridge.arr import (
     auto_approve_requests,
     mark_jellyseerr_available,
     reconcile_movie_path,
+    sonarr_monitored_missing_keys,
     trigger_arr_rescan,
 )
 
@@ -904,11 +905,25 @@ async def poll_item(
     if decision["status"] == "aired":
         log.info("poll %s: episode aired %s — searching now",
                  item_id, item.get("air_anchor_utc"))
+    elif decision["status"] == "initial":
+        log.info("poll %s: fresh request — initial search (availability gate bypassed this once)",
+                 item_id)
 
     # Queue-aware: don't spam the DC hubs for anything already in the AirDC++
     # queue (yours or the bridge's). Remove a bundle and it re-enters the search
     # set automatically next sweep (unless *arr now reports it present).
     if kind == "tv":
+        if not needed_keys and decision["status"] == "initial":
+            # Fully-unaired series: the synced monitored_keys only carry AIRED
+            # episodes, so the probe search would have nothing to look for. Pull
+            # the monitored, file-less episode list live from Sonarr (any air
+            # status) for this one search; the per-poll cap bounds the burst.
+            sid = item_id.partition(":")[2]
+            live = await sonarr_monitored_missing_keys(cfg, sid)
+            if live:
+                needed_keys = live - in_queue_keys - done
+                log.info("poll %s: initial search across %d monitored episode(s) (incl. unaired)",
+                         item_id, len(needed_keys))
         if not needed_keys:
             log.info("poll %s: all wanted episodes already queued or downloaded — not searching", item_id)
             return False
