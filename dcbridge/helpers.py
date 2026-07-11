@@ -436,6 +436,14 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
     initial = last == 0 or (rc and last < rc)
     _initial_due = {"due": True, "status": "initial", "next_due": now_ts,
                     "detail": "first search on fresh request"}
+    # Backlog drain: episodes a previous poll left unsearched because of the
+    # per-poll cap. Keep the item due EVERY sweep until the backlog clears, so a
+    # large (often old) series isn't throttled to the content-age back-off with
+    # episodes still un-searched. Only ever set for TV after a real search, so the
+    # availability gate below is moot here — jump straight to due.
+    if int(item.get("search_backlog") or 0) > 0:
+        return {"due": True, "status": "draining", "next_due": now_ts,
+                "detail": f"{int(item['search_backlog'])} episode(s) left to search"}
     # Per-kind availability gate: don't search before the content exists. TV works
     # off Sonarr air dates (the air_offset is already baked into next_air/air_anchor
     # at sync); movies off the release date + match.movie_release_offset_days.

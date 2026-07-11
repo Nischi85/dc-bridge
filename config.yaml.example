@@ -97,6 +97,13 @@ poller:
   tv_search_settle_seconds: 15   # wait for hub results after firing each search
   tv_search_gap_seconds: 15      # extra pause before the next episode's search
   tv_max_search_per_poll: 8      # episodes searched per poll; rest picked up next sweep
+  # Stalled-grab fallback (TV). A queued episode bundle that downloaded 0 bytes
+  # and is older than this is treated as dead-sourced (e.g. "File not available"):
+  # the bridge removes it, remembers the release so it isn't re-grabbed, and
+  # retries a different release — falling to the next resolution once a quality's
+  # releases are exhausted. Gives up after max_stall_retries removals per episode.
+  stall_grace_minutes: 30
+  max_stall_retries: 4           # 0 disables the fallback
   # Content-age back-off. Older CONTENT is searched less often, where age is
   # measured from when the title became available — a movie's release date, or a
   # series' newest still-wanted aired episode — NOT when it was requested. So a

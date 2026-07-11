@@ -32,6 +32,18 @@ CREATE TABLE IF NOT EXISTS completed (
     queued_at       INTEGER NOT NULL,
     PRIMARY KEY(item_id, key)
 );
+
+-- Releases that were queued for a key but stalled (dead sources / "File not
+-- available") and got removed. Excluded from future candidate selection so the
+-- retry picks a different release — and, once a quality's releases are exhausted,
+-- the next resolution in the preference order.
+CREATE TABLE IF NOT EXISTS failed_releases (
+    item_id         TEXT NOT NULL,
+    key             TEXT NOT NULL,       -- "S03E04" or "movie"
+    release_name    TEXT NOT NULL,
+    failed_at       INTEGER NOT NULL,
+    PRIMARY KEY(item_id, key, release_name)
+);
 """
 
 
@@ -53,6 +65,7 @@ class State:
             ("jellyseerr_media_id", "ALTER TABLE tracked_items ADD COLUMN jellyseerr_media_id INTEGER"),
             ("quality_priority",    "ALTER TABLE tracked_items ADD COLUMN quality_priority TEXT"),
             ("release_date_utc",    "ALTER TABLE tracked_items ADD COLUMN release_date_utc TEXT"),
+            ("search_backlog",      "ALTER TABLE tracked_items ADD COLUMN search_backlog INTEGER"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -94,6 +107,7 @@ class State:
         async with self._lock:
             self.conn.execute("DELETE FROM tracked_items WHERE id = ?", (id_,))
             self.conn.execute("DELETE FROM completed WHERE item_id = ?", (id_,))
+            self.conn.execute("DELETE FROM failed_releases WHERE item_id = ?", (id_,))
             self.conn.commit()
 
     async def list_items(self) -> list[dict]:
@@ -101,7 +115,8 @@ class State:
             cur = self.conn.execute(
                 "SELECT id, kind, title, target_dir_fs, monitored_keys, request_status,"
                 " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
-                " jellyseerr_media_id, quality_priority, release_date_utc FROM tracked_items"
+                " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog"
+                " FROM tracked_items"
             )
             return [
                 {
@@ -119,6 +134,7 @@ class State:
                     "jellyseerr_media_id": r[11],
                     "quality_priority": json.loads(r[12]) if r[12] else [],
                     "release_date_utc": r[13],
+                    "search_backlog": r[14] or 0,
                 }
                 for r in cur.fetchall()
             ]
@@ -147,6 +163,34 @@ class State:
                 (ts, item_id),
             )
             self.conn.commit()
+
+    async def set_search_backlog(self, item_id: str, n: int) -> None:
+        """How many still-needed episodes were left unsearched this poll because of
+        the per-poll cap. >0 keeps the item due every sweep (compute_cadence) until
+        the backlog drains, instead of dropping into the content-age back-off."""
+        async with self._lock:
+            self.conn.execute(
+                "UPDATE tracked_items SET search_backlog = ? WHERE id = ?",
+                (int(n), item_id),
+            )
+            self.conn.commit()
+
+    async def add_failed_release(self, item_id: str, key: str, release_name: str) -> None:
+        async with self._lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO failed_releases (item_id, key, release_name, failed_at)"
+                " VALUES (?,?,?,?)",
+                (item_id, key, release_name, int(time.time())),
+            )
+            self.conn.commit()
+
+    async def get_failed_releases(self, item_id: str, key: str) -> set[str]:
+        async with self._lock:
+            cur = self.conn.execute(
+                "SELECT release_name FROM failed_releases WHERE item_id = ? AND key = ?",
+                (item_id, key),
+            )
+            return {r[0] for r in cur.fetchall()}
 
     async def set_tv_air(
         self, item_id: str, air_anchor: str | None, next_air: str | None
@@ -208,6 +252,10 @@ class State:
                 "INSERT OR IGNORE INTO completed (item_id, key, bundle_id, release_name, queued_at)"
                 " VALUES (?,?,?,?,?)",
                 (item_id, key, bundle_id, release_name, int(time.time())),
+            )
+            # A finished key needs no failed-release history anymore.
+            self.conn.execute(
+                "DELETE FROM failed_releases WHERE item_id = ? AND key = ?", (item_id, key)
             )
             self.conn.commit()
 

@@ -353,22 +353,29 @@ async def poller_loop(app: FastAPI) -> None:
                 for it in items:
                     if it["id"] in kept_ids or it["kind"] != "movie":
                         continue
-                    marker = await state.get_completed(it["id"], "movie")
-                    if marker is None or marker[0] == "(pre-existing)":
-                        continue
-                    if await state.is_completed(it["id"], "import_verified"):
-                        continue
-                    imported = await arr_has_imported(cfg, it)
-                    if imported is True:
-                        await state.mark_completed(
-                            it["id"], "import_verified", None, "(verified)"
+                    # A transient *arr/AirDC++ error (e.g. a momentary auth 401)
+                    # while probing ONE movie must not abort the whole sweep — skip
+                    # this item and let the next sweep retry it.
+                    try:
+                        marker = await state.get_completed(it["id"], "movie")
+                        if marker is None or marker[0] == "(pre-existing)":
+                            continue
+                        if await state.is_completed(it["id"], "import_verified"):
+                            continue
+                        imported = await arr_has_imported(cfg, it)
+                        if imported is True:
+                            await state.mark_completed(
+                                it["id"], "import_verified", None, "(verified)"
+                            )
+                            continue
+                        if imported is None:
+                            continue  # *arr unreachable; retry next sweep
+                        comp = await movie_completion(
+                            ad, cfg, it, marker[0], marker[1], now_ts
                         )
+                    except Exception:
+                        log.exception("completion follow-up probe failed for %s", it.get("id"))
                         continue
-                    if imported is None:
-                        continue  # *arr unreachable; retry next sweep
-                    comp = await movie_completion(
-                        ad, cfg, it, marker[0], marker[1], now_ts
-                    )
                     if comp == "complete":
                         log.info(
                             "completion follow-up: %s (%s) landed but not imported"
@@ -485,9 +492,56 @@ async def remove_finished_tv_bundles(
         await trigger_arr_rescan(cfg, item_id)
 
 
+async def remove_stalled_tv_bundles(
+    ad: AirDCPP, state: State, cfg: Config, item: dict, bundles: list[dict], now_ts: int
+) -> int:
+    """Detect episode bundles that stalled on dead sources (0 bytes downloaded past
+    the grace window — the "File not available" case) and clear them so the episode
+    re-enters the search set. The stalled release is recorded so the retry skips it
+    and picks a different release / next resolution. After max_stall_retries
+    removals for one episode we stop (leave it queued) and warn, to avoid churn.
+
+    Mutates `bundles` in place: removed bundles are dropped from the shared snapshot
+    so this sweep's in_queue_keys no longer counts them and the key is re-searched.
+    Returns the number of bundles removed."""
+    if cfg.poller.max_stall_retries <= 0 or cfg.poller.stall_grace_minutes <= 0:
+        return 0
+    item_id, title = item["id"], item["title"]
+    grace = cfg.poller.stall_grace_minutes * 60
+    dropped: set = set()
+    for b in bundles:
+        name = b.get("name") or ""
+        st = b.get("status") or {}
+        eks = episode_keys_from_name(name)
+        if not eks or not release_matches_title(name, title, anchored=True):
+            continue
+        if st.get("completed") or float(b.get("downloaded_bytes") or 0) > 0:
+            continue  # done, or actually making progress — leave it alone
+        if now_ts - int(b.get("time_added") or now_ts) < grace:
+            continue  # still within the grace window; sources may yet connect
+        # Give up after enough retries for any of this bundle's episodes.
+        maxed = False
+        for ek in eks:
+            if len(await state.get_failed_releases(item_id, ek)) >= cfg.poller.max_stall_retries:
+                maxed = True
+        if maxed:
+            log.warning("poll %s: %r stalled but retry limit reached — leaving it queued", item_id, name)
+            continue
+        if await ad.remove_bundle(b["id"], remove_finished=False):
+            for ek in eks:
+                await state.add_failed_release(item_id, ek, name)
+            dropped.add(b["id"])
+            log.info("poll %s: removed stalled bundle %r (dead sources) — will retry another release",
+                     item_id, name)
+    if dropped:
+        bundles[:] = [b for b in bundles if b.get("id") not in dropped]
+    return len(dropped)
+
+
 def _select_candidates(
     results: list[dict], kind: str, title: str, item: dict, cfg: Config,
     item_priority: list[str], needed_keys: set[str], item_id: str,
+    exclude_releases: set[str] = frozenset(),
 ) -> dict[str, list[dict[str, Any]]]:
     """Group raw hub hits into release folders and apply the accept/reject guards
     (quality, adult, foreign-language dub, unwanted subs, title, year, season).
@@ -531,6 +585,11 @@ def _select_candidates(
     for parent_dir, g in groups.items():
         release_name = g["release_name"]
         total_size = g["total_size"]
+        # Skip releases a prior grab stalled on (dead sources) so the retry moves
+        # to a different release / the next resolution instead of re-queuing it.
+        if release_name in exclude_releases:
+            log.debug("poll %s: skip %r — previously stalled release", item_id, release_name)
+            continue
         if not passes_quality(release_name, total_size, kind, cfg.quality, item_priority):
             continue
         # Adult-content reject: scene porn is tagged XXX and often shares a
@@ -882,6 +941,15 @@ async def poll_item(
         wanted = set(item.get("monitored_keys") or [])
         tv_bundles = bundles
         await remove_finished_tv_bundles(ad, state, cfg, item, tv_bundles)
+        # Clear dead-sourced (stalled) bundles BEFORE reading the queue, so their
+        # episodes re-enter needed_keys and get retried with a different release.
+        freed = await remove_stalled_tv_bundles(ad, state, cfg, item, tv_bundles, int(time.time()))
+        if freed:
+            # Force this item due THIS sweep (the cadence gate below runs next):
+            # a backed-off series must re-search the episodes we just freed now,
+            # not wait out its back-off tier. Persist so it keeps draining.
+            item["search_backlog"] = max(int(item.get("search_backlog") or 0), freed)
+            await state.set_search_backlog(item_id, item["search_backlog"])
         in_queue_keys = _series_keys_in_queue(tv_bundles, title)
         # Still needed = wanted, minus what's already in the queue, minus what we
         # already have (completed markers / Sonarr hasFile). This is what we search
@@ -925,6 +993,7 @@ async def poll_item(
                 log.info("poll %s: initial search across %d monitored episode(s) (incl. unaired)",
                          item_id, len(needed_keys))
         if not needed_keys:
+            await state.set_search_backlog(item_id, 0)  # nothing left; resume normal cadence
             log.info("poll %s: all wanted episodes already queued or downloaded — not searching", item_id)
             return False
     elif kind == "movie" and _movie_in_queue(bundles, title, item.get("year")):
@@ -957,6 +1026,10 @@ async def poll_item(
         eks = sorted(needed_keys)
         cap = max(1, cfg.poller.tv_max_search_per_poll)
         deferred = eks[cap:]
+        # Keep the item due every sweep until this backlog drains (see
+        # compute_cadence 'draining'), instead of falling into the age back-off
+        # with episodes still un-searched.
+        await state.set_search_backlog(item_id, len(deferred))
         if deferred:
             log.info("poll %s: %d episode(s) this poll, %d deferred to next sweep: %s",
                      item_id, cap, len(deferred), ",".join(deferred))
@@ -972,8 +1045,10 @@ async def poll_item(
                 await asyncio.sleep(cfg.poller.tv_search_settle_seconds)
                 results = await ad.get_results(ep_iid, 0, 500)
                 total_results += len(results)
+                exclude = await state.get_failed_releases(item_id, ek)
                 candidates_by_key = _select_candidates(
-                    results, kind, title, item, cfg, item_priority, {ek}, item_id
+                    results, kind, title, item, cfg, item_priority, {ek}, item_id,
+                    exclude_releases=exclude,
                 )
                 queued += await _queue_candidates(
                     ad, state, cfg, ep_iid, kind, item_id,

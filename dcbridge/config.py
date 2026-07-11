@@ -87,6 +87,15 @@ class PollerCfg(BaseModel):
     tv_search_settle_seconds: float = 15.0
     tv_search_gap_seconds: float = 15.0
     tv_max_search_per_poll: int = 8
+    # Stalled-grab fallback (TV episodes). A queued bundle that has downloaded 0
+    # bytes and is older than stall_grace_minutes is treated as dead-sourced
+    # ("File not available" / gone). The bridge removes it, remembers the release
+    # so it's not re-grabbed, and re-searches — picking a different release and,
+    # once a resolution's releases are exhausted, the next resolution in the
+    # quality preference order. It gives up after max_stall_retries removals for
+    # one episode (0 disables the whole fallback).
+    stall_grace_minutes: float = 30.0
+    max_stall_retries: int = 4
     backoff: list[BackoffTier] = Field(default_factory=list)
     # When False (default), an episode/movie that was once fulfilled is NOT
     # re-downloaded if its file is later deleted — the completion marker keeps it
