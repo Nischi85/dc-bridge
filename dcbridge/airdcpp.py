@@ -30,6 +30,15 @@ class AirDCPP:
         self._lock = asyncio.Lock()
 
     async def close(self) -> None:
+        # Delete our server-side session before closing: AirDC++ caps sessions per
+        # user, and every leaked one (helper scripts, container restarts) counts
+        # against the cap until authorize itself starts returning 401. The
+        # login-time purge only helps once a login SUCCEEDS — at the cap it can't.
+        if self._token is not None and self._session_id is not None:
+            try:
+                await self.client.delete(f"/api/v1/sessions/{self._session_id}")
+            except Exception:
+                log.debug("airdcpp: session self-delete failed (ignored)")
         await self.client.aclose()
 
     async def _login(self) -> None:
