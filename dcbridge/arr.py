@@ -410,7 +410,12 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
     h = {"X-Api-Key": js.api_key}
     base = js.url.rstrip("/")
 
-    await state.clear_all_request_statuses()
+    # NOTE: we deliberately do NOT clear all statuses up front. That left a window
+    # where every item was NULL until the re-stamp finished, and a poller sweep
+    # landing in it saw "0 items to search". Instead we keep prior statuses during
+    # the fetch, remember which items are active this run, and demote only the
+    # now-stale ones atomically at the end (clear_request_statuses_except).
+    seen_ids: set[str] = set()
     per_status: dict[str, int] = {}
     matched_total = 0
     unmatched_total = 0
@@ -461,6 +466,7 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
                 ok = await state.set_request_status(item_id, status)
                 if ok:
                     matched_total += 1
+                    seen_ids.add(item_id)
                     # Remember the Jellyseerr media id so the bridge can flip the
                     # request to "available" once its download lands on disk.
                     await state.set_jellyseerr_media_id(item_id, media.get("id"))
@@ -481,6 +487,9 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
             if skip >= total:
                 break
         per_status[status] = seen_in_status
+
+    # Atomically demote items that are no longer active this run (no all-NULL window).
+    await state.clear_request_statuses_except(seen_ids)
 
     log.info(
         "jellyseerr sync: per-status=%s matched=%d unmatched=%d",

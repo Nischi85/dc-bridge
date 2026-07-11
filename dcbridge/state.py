@@ -214,6 +214,26 @@ class State:
             self.conn.execute("UPDATE tracked_items SET request_status = NULL")
             self.conn.commit()
 
+    async def clear_request_statuses_except(self, keep: set[str]) -> None:
+        """Demote items no longer active — NULL request_status for every item NOT
+        in `keep`, in ONE statement. Used at the END of a Jellyseerr sync instead
+        of a clear-at-start, so a concurrent poller sweep never sees the transient
+        all-NULL window (which made it skip the whole sweep — '0 items to search')."""
+        async with self._lock:
+            if keep:
+                placeholders = ",".join("?" * len(keep))
+                self.conn.execute(
+                    f"UPDATE tracked_items SET request_status = NULL"
+                    f" WHERE request_status IS NOT NULL AND id NOT IN ({placeholders})",
+                    tuple(keep),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE tracked_items SET request_status = NULL"
+                    " WHERE request_status IS NOT NULL"
+                )
+            self.conn.commit()
+
     async def set_request_status(self, item_id: str, status: str) -> bool:
         """Mark a single tracked item with a Jellyseerr request status. Returns
         True if the item existed (was matched).
