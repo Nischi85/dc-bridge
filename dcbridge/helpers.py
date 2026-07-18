@@ -354,6 +354,36 @@ def release_starts_with_title(release_name: str, title: str) -> bool:
     return n >= min(len(want), 2) and (len(want) > 2 or n == len(want))
 
 
+def movie_title_prefix_ok(release_name: str, title: str) -> bool:
+    """Stronger movie guard: the release's title portion — the tokens BEFORE its
+    first year token — must be a prefix of the requested title's tokens, not merely
+    share its opening words.
+
+    release_starts_with_title() deliberately tolerates trailing words (to accept a
+    scene name that abbreviates a long subtitle before the year, e.g.
+    'Johan.Falk.GSI.2015' for 'Johan Falk: GSI - Gruppen...'). But that also lets a
+    *different, longer-titled* film through when it merely begins with the same
+    words — e.g. 'The.Odyssey.with.Dan.Snow.2026' matched the movie 'The Odyssey'.
+    Requiring the pre-year tokens to be a prefix of the title rejects that (the
+    title has no 'with dan snow') while still accepting the abbreviation case
+    ('johan falk gsi' IS a prefix of the full title) and the exact match
+    ('The.Odyssey.2026'). Yearless releases can't be split this way and pass
+    through — the caller's release_starts_with_title() still applies to them."""
+    want = _title_tokens(title)
+    if not want:
+        return True
+    rel = [t for t in _TITLE_SPLIT_RE.split(to_ascii(release_name).lower()) if t]
+    if len(rel) > 1 and rel[0] in _LEADING_ARTICLES:
+        rel = rel[1:]
+    yi = next((i for i, t in enumerate(rel) if _YEAR_RE.fullmatch(t)), None)
+    if yi is None or yi == 0:
+        # No year to split on, or the title itself starts with a year-like token
+        # (e.g. '2001.A.Space.Odyssey'): can't strengthen, leave to starts_with.
+        return True
+    pre = rel[:yi]
+    return pre == want[: len(pre)]
+
+
 def is_adult_release(name: str, title: str) -> bool:
     """Reject scene-tagged adult content (tags from filters.reject_adult_tags,
     default XXX) for a non-adult request. A request whose own title carries an

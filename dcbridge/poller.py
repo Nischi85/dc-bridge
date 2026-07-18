@@ -26,6 +26,7 @@ from dcbridge.helpers import (
     is_adult_release,
     is_foreign_language,
     is_sd_release,
+    movie_title_prefix_ok,
     passes_quality,
     release_matches_title,
     release_matches_year,
@@ -618,6 +619,13 @@ def _select_candidates(
         if kind == "movie" and not release_starts_with_title(release_name, title):
             log.debug("poll %s: skip %r — not the requested movie (title not at start)",
                       item_id, release_name)
+            continue
+        # Reject a different, longer-titled film that merely begins with the same
+        # words — e.g. 'The.Odyssey.with.Dan.Snow.2026' for the movie 'The Odyssey'.
+        # The release's pre-year tokens must be a prefix of the requested title.
+        if kind == "movie" and not movie_title_prefix_ok(release_name, title):
+            log.debug("poll %s: skip %r — title has extra words before year, not %r",
+                      item_id, release_name, title)
             continue
         # Year guard for movies: a sequel request ("...2", 2026) must not grab
         # the same-title older film. DVD/SD releases legitimately omit the year,
