@@ -75,9 +75,33 @@ def sanitize_for_dc_search(s: str) -> str:
     return s
 
 
+def title_to_folder_name(title: str) -> str:
+    """A scene-style, dot-separated folder name for `title` (e.g. "Hem till
+    Midgård" -> "Hem.till.Midgard"). Reuses sanitize_for_dc_search's ASCII-fold
+    / apostrophe-strip so a series/movie folder name always matches the same
+    charset scene releases (and the rest of this library) use."""
+    return sanitize_for_dc_search(title).replace(" ", ".")
+
+
+_UNSAFE_FOLDER_CHAR_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def folder_name_is_scene_safe(name: str) -> bool:
+    """True if `name` contains only scene-safe characters (alnum, dot, dash,
+    underscore) — i.e. no non-ASCII letters, spaces, or punctuation Sonarr's
+    own folder naming might leave in (e.g. "Midgård")."""
+    return not _UNSAFE_FOLDER_CHAR_RE.search(name)
+
+
 def episode_keys_from_name(name: str) -> list[str]:
     """Return ['S03E04', ...] for any episode markers in `name`."""
     return [f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}" for m in _EPISODE_RE.finditer(name)]
+
+
+def season_of_episode_key(key: str) -> Optional[int]:
+    """The season number of a 'SxxExx' key (e.g. "S05E01" -> 5), or None."""
+    m = re.match(r"S(\d{1,2})E\d", key, re.I)
+    return int(m.group(1)) if m else None
 
 
 # Map Sonarr/Radarr quality `source` values to the substring that appears in a

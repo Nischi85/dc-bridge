@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -33,6 +32,7 @@ from dcbridge.helpers import (
     release_starts_with_title,
     sanitize_for_dc_search,
     score_result,
+    season_of_episode_key,
 )
 from dcbridge.util import (
     _HUB_PATH_SEP,
@@ -59,6 +59,7 @@ from dcbridge.arr import (
     auto_approve_requests,
     mark_jellyseerr_available,
     reconcile_movie_path,
+    reconcile_series_ascii_path,
     sonarr_monitored_missing_keys,
     trigger_arr_rescan,
 )
@@ -148,6 +149,11 @@ async def handle_sonarr_event(app: FastAPI, ev) -> None:
         if not arr_path:
             log.warning("sonarr %s: no series.path in payload; cannot determine target dir", sid)
             return
+        # Fix a non-scene-safe folder name (e.g. non-ASCII "Midgård") before
+        # deriving the download target.
+        fixed = await reconcile_series_ascii_path(cfg, f"sonarr:{sid}")
+        if fixed:
+            arr_path = fixed
         target_dir_fs = arr_to_fs(arr_path, cfg.path_translate)
         if target_dir_fs == arr_path:
             log.warning("sonarr %s (%s): no path_translate rule matched %r", sid, title, arr_path)
@@ -722,8 +728,7 @@ async def _queue_candidates(
         # Season layer for TV (sonarr's seasonFolderFormat is "Season.{season}"
         # — dot, not space). Movies go straight under the movie root.
         if kind == "tv":
-            m_season = re.match(r"S(\d{1,2})E\d", key, re.I)
-            season_num = int(m_season.group(1)) if m_season else 0
+            season_num = season_of_episode_key(key) or 0
             release_root_smb = target_base_smb + f"Season.{season_num}\\" + release_name + "\\"
             parent_for_folder = target_base_smb + f"Season.{season_num}\\"
         else:
@@ -831,7 +836,51 @@ async def _queue_candidates(
     return queued
 
 
+def _scope_to_requested_seasons(keys: set[str], item: dict) -> set[str]:
+    """Restrict episode keys to item['requested_seasons'] (the season(s) an
+    active Jellyseerr request actually asked for), when known. A series can
+    have Sonarr-monitored seasons well beyond what was ever requested — e.g.
+    leftover monitoring from before this item was ever actively tracked — and
+    without this, the drain-everything-monitored/oldest-first search would grab
+    all of it, not just the requested season. No-op when requested_seasons is
+    unset (Jellyseerr integration off, or not yet synced) — same fail-open as
+    the rest of the Jellyseerr-gated behavior."""
+    seasons = item.get("requested_seasons")
+    if not seasons:
+        return keys
+    want = set(seasons)
+    return {k for k in keys if season_of_episode_key(k) in want}
+
+
+_ITEM_POLL_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _item_poll_lock(item_id: str) -> asyncio.Lock:
+    """One lock per tracked item, created on first use."""
+    lock = _ITEM_POLL_LOCKS.get(item_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ITEM_POLL_LOCKS[item_id] = lock
+    return lock
+
+
 async def poll_item(
+    cfg: Config, state: State, ad: AirDCPP, item: dict,
+    completion: Optional[dict[str, str]] = None,
+    bundles: Optional[list[dict]] = None,
+) -> bool:
+    """Serialize search rounds per item so overlapping webhook reactions can't
+    double-grab. Jellyseerr fires several events for one new request (MEDIA_PENDING,
+    MEDIA_APPROVED), each spawning a react task; run concurrently they both snapshot
+    an empty AirDC++ queue before either queues, so the in-queue guard passes twice
+    and two quality tiers of the same movie download at once (seen live: a WEB-DL
+    and a BluRay of 'Normal' both queued). Under the lock the second run re-reads a
+    fresh queue and no-ops via the existing _movie_in_queue / cadence guards."""
+    async with _item_poll_lock(str(item["id"])):
+        return await _poll_item(cfg, state, ad, item, completion, bundles)
+
+
+async def _poll_item(
     cfg: Config, state: State, ad: AirDCPP, item: dict,
     completion: Optional[dict[str, str]] = None,
     bundles: Optional[list[dict]] = None,
@@ -968,7 +1017,7 @@ async def poll_item(
         done = set() if cfg.poller.refetch_deleted else {
             k for k, _, _ in await state.get_completed_keys(item_id)
         }
-        needed_keys = wanted - in_queue_keys - done
+        needed_keys = _scope_to_requested_seasons(wanted - in_queue_keys - done, item)
 
     now_ts = int(time.time())
 
@@ -997,7 +1046,7 @@ async def poll_item(
             sid = item_id.partition(":")[2]
             live = await sonarr_monitored_missing_keys(cfg, sid)
             if live:
-                needed_keys = live - in_queue_keys - done
+                needed_keys = _scope_to_requested_seasons(live - in_queue_keys - done, item)
                 log.info("poll %s: initial search across %d monitored episode(s) (incl. unaired)",
                          item_id, len(needed_keys))
         if not needed_keys:

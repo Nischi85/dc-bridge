@@ -17,6 +17,8 @@ from dcbridge.helpers import (
     _iso_to_epoch,
     _truncate,
     _utc_iso,
+    folder_name_is_scene_safe,
+    title_to_folder_name,
 )
 from dcbridge.util import (
     arr_to_fs,
@@ -161,6 +163,11 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
         routed = await route_children_series(url, h, http, cfg.children_routing, s)
         if routed:
             s["path"] = routed
+        # Fix a non-scene-safe folder name (e.g. non-ASCII "Midgård") before
+        # deriving the download target, same spot as children-routing above.
+        fixed = await reconcile_series_ascii_path(cfg, f"sonarr:{sid}")
+        if fixed:
+            s["path"] = fixed
         arr_path = s.get("path") or ""
         if not arr_path:
             log.warning("sonarr sync: series %s (%s) has no path; skipping", sid, title)
@@ -419,6 +426,13 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
     per_status: dict[str, int] = {}
     matched_total = 0
     unmatched_total = 0
+    # TV: union of season numbers across every active request for a series (a
+    # show can have more than one active request at once, e.g. season 1 still
+    # processing and season 5 freshly approved) — the actual scope of what
+    # should be searched, as opposed to whatever Sonarr happens to have
+    # monitored (which can include seasons monitored long before this item was
+    # ever actively tracked). Applied by the poller via requested_seasons.
+    requested_seasons: dict[str, set[int]] = {}
     for status in js.active_statuses:
         seen_in_status = 0
         skip = 0
@@ -470,6 +484,12 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
                     # Remember the Jellyseerr media id so the bridge can flip the
                     # request to "available" once its download lands on disk.
                     await state.set_jellyseerr_media_id(item_id, media.get("id"))
+                    if mtype == "tv":
+                        nums = {
+                            s.get("seasonNumber") for s in (req.get("seasons") or [])
+                            if s.get("seasonNumber") is not None
+                        }
+                        requested_seasons.setdefault(item_id, set()).update(nums)
                     # Stamp the request's createdAt so age-based back-off has
                     # a reference timestamp. Jellyseerr returns ISO Z strings.
                     created = req.get("createdAt")
@@ -490,6 +510,8 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
 
     # Atomically demote items that are no longer active this run (no all-NULL window).
     await state.clear_request_statuses_except(seen_ids)
+    for item_id, seasons in requested_seasons.items():
+        await state.set_requested_seasons(item_id, sorted(seasons))
 
     log.info(
         "jellyseerr sync: per-status=%s matched=%d unmatched=%d",
@@ -683,5 +705,58 @@ async def reconcile_movie_path(cfg: Config, item_id: str, release_name: str) -> 
                 )
     except Exception as e:
         log.warning("reconcile_movie_path %s failed: %s", item_id, e)
+
+
+async def reconcile_series_ascii_path(cfg: Config, item_id: str) -> Optional[str]:
+    """If a Sonarr series' folder name carries a non-scene-safe character (e.g.
+    "Hem.till.Midgård" — Sonarr transliterates nothing), rename it in place to
+    the scene-style ASCII form ("Hem.till.Midgard"). Unlike reconcile_movie_path,
+    this touches Sonarr's OWN writable library layer (not a read-only scene
+    source), so Sonarr does a real move (moveFiles=true). No-op when the folder
+    is already scene-safe, or when the series already has episode file(s) (don't
+    orphan an existing download — mirrors route_children_series's guard).
+    Returns the new path on success, else None."""
+    prefix, _, sid = item_id.partition(":")
+    if prefix != "sonarr" or not (cfg.sonarr.api_key and sid.isdigit()):
+        return None
+    base = cfg.sonarr.url.rstrip("/")
+    h = {"X-Api-Key": cfg.sonarr.api_key, "Content-Type": "application/json"}
+    try:
+        async with http_session() as http:
+            r = await http.get(f"{base}/api/v3/series/{sid}", headers=h)
+            if r.status_code != 200:
+                log.warning("reconcile series path %s: GET series -> %s", item_id, r.status_code)
+                return None
+            series = r.json()
+            cur_path = (series.get("path") or "").rstrip("/")
+            folder = Path(cur_path).name if cur_path else ""
+            if not folder or folder_name_is_scene_safe(folder):
+                return None
+            if (series.get("statistics") or {}).get("episodeFileCount"):
+                log.warning(
+                    "reconcile series path %s: folder %r not scene-safe but has "
+                    "episode file(s); leaving it put", item_id, folder,
+                )
+                return None
+            root = str(Path(cur_path).parent)
+            new_folder = title_to_folder_name(series.get("title") or folder)
+            new_path = f"{root}/{new_folder}"
+            series["path"] = new_path
+            pr = await http.put(
+                f"{base}/api/v3/series/{sid}",
+                headers=h,
+                params={"moveFiles": "true"},
+                json=series,
+            )
+            if pr.status_code in (200, 201, 202):
+                log.info("reconcile series path %s: renamed %s -> %s", item_id, cur_path, new_path)
+                return new_path
+            log.warning(
+                "reconcile series path %s: PUT series -> %s %s",
+                item_id, pr.status_code, pr.text[:200],
+            )
+    except Exception as e:
+        log.warning("reconcile_series_ascii_path %s failed: %s", item_id, e)
+    return None
 
 

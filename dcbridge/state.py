@@ -66,6 +66,7 @@ class State:
             ("quality_priority",    "ALTER TABLE tracked_items ADD COLUMN quality_priority TEXT"),
             ("release_date_utc",    "ALTER TABLE tracked_items ADD COLUMN release_date_utc TEXT"),
             ("search_backlog",      "ALTER TABLE tracked_items ADD COLUMN search_backlog INTEGER"),
+            ("requested_seasons",   "ALTER TABLE tracked_items ADD COLUMN requested_seasons TEXT"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -115,7 +116,8 @@ class State:
             cur = self.conn.execute(
                 "SELECT id, kind, title, target_dir_fs, monitored_keys, request_status,"
                 " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
-                " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog"
+                " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
+                " requested_seasons"
                 " FROM tracked_items"
             )
             return [
@@ -135,6 +137,7 @@ class State:
                     "quality_priority": json.loads(r[12]) if r[12] else [],
                     "release_date_utc": r[13],
                     "search_backlog": r[14] or 0,
+                    "requested_seasons": json.loads(r[15]) if r[15] else None,
                 }
                 for r in cur.fetchall()
             ]
@@ -322,6 +325,19 @@ class State:
             self.conn.execute(
                 "UPDATE tracked_items SET monitored_keys = ? WHERE id = ?",
                 (json.dumps(keys or []), item_id),
+            )
+            self.conn.commit()
+
+    async def set_requested_seasons(self, item_id: str, seasons: list[int]) -> None:
+        """Store the season numbers actually covered by this TV item's active
+        Jellyseerr request(s) (union, when there's more than one) — used to keep
+        the poller from backfilling a season Sonarr happens to have monitored
+        (e.g. leftover from before this item was ever actively tracked) but that
+        was never actually requested."""
+        async with self._lock:
+            self.conn.execute(
+                "UPDATE tracked_items SET requested_seasons = ? WHERE id = ?",
+                (json.dumps(sorted(seasons)) if seasons else None, item_id),
             )
             self.conn.commit()
 
