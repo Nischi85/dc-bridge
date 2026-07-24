@@ -390,6 +390,50 @@ def release_matches_title(release_name: str, title: str, anchored: bool = False)
     return re.search(pattern, release_name.lower()) is not None
 
 
+def tv_release_extra_words_ok(
+    release_name: str, title: str, year: Optional[int],
+    tolerance: int = 1, loose_trailing_s: bool = True,
+) -> bool:
+    """Reject a same-titled DIFFERENT series wearing this series' name.
+
+    release_matches_title(anchored=True) requires the series title to LEAD the
+    release name, but puts no constraint on what sits between the title and the
+    SxxExx marker — which let a 'Wallander' (2005) search grab the OLDER film
+    adaptations packaged as episodes: 'Wallander.Hundarna.I.Riga.S01E01...',
+    'Wallander.Villospar.2001.S01E03...'. Scene naming puts the episode title
+    AFTER the marker ('Series.SxxExx.Episode.Title...'), so words wedged
+    between the series title and the marker belong to a different work.
+
+    Allowed between title and marker: nothing, or the series' own year
+    disambiguator within ±tolerance ('Wallander.2005.S01E01' for a 2005
+    series). A year outside tolerance ('Wallander.Villospar.2001.S01E03' for
+    the 2005 series) or any other word is rejected. A season-subtitle year that
+    IS part of the franchise name (e.g. 'American.Horror.Story.1984.S09E01')
+    still matches via its alternate title, whose tokens include the year.
+    Permissive when the release has no SxxExx token or the title is empty."""
+    want = _title_tokens(title)
+    if not want:
+        return True
+    rel = [t for t in _TITLE_SPLIT_RE.split(to_ascii(release_name).lower()) if t]
+    if len(rel) > 1 and rel[0] in _LEADING_ARTICLES:
+        rel = rel[1:]
+    mi = next((i for i, t in enumerate(rel) if _EPISODE_RE.fullmatch(t)), None)
+    if mi is None:
+        return True
+    n = 0
+    for wt, rt in zip(want, rel):
+        if not _tokens_equal_loose(wt, rt, loose_trailing_s):
+            break
+        n += 1
+    for t in rel[n:mi]:
+        if _YEAR_RE.fullmatch(t):
+            if year and abs(int(t) - int(year)) > tolerance:
+                return False
+            continue
+        return False
+    return True
+
+
 def release_starts_with_title(release_name: str, title: str, loose_trailing_s: bool = True) -> bool:
     """True if the release name BEGINS with the movie title, allowing the scene
     name to abbreviate a long title (e.g. 'Johan.Falk.GSI...' for 'Johan Falk:
@@ -547,8 +591,18 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
         next_air = item.get("next_air_utc")
         if not air_anchor:
             if not next_air:
-                # Nothing wanted and nothing upcoming: never probe a complete
-                # series (force-available flow also keys on this status).
+                # Nothing wanted and nothing upcoming. A fresh request still gets
+                # its one probe: a series tracked seconds ago by the add-webhook
+                # has no air/episode data until the next *arr sync, and without
+                # the probe it sits here misclassified as complete — the
+                # react-immediately path silently no-ops and the item waits out
+                # a full sync + sweep (poll_item's initial live-fetch pulls the
+                # episode list straight from Sonarr instead). Beyond that one
+                # probe: never poke a complete series (force-available flow also
+                # keys on this status; poll_item stamps the probe as spent even
+                # when it finds nothing, so this can't loop).
+                if initial:
+                    return _initial_due
                 return {"due": False, "status": "complete", "next_due": None,
                         "detail": "no episode wanted"}
             if next_air > _utc_iso(now_ts):

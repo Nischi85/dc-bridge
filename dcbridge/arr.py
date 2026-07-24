@@ -195,6 +195,7 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             title=title,
             target_dir_fs=target_dir_fs,
             monitored_keys=None,
+            year=s.get("year"),
         )
         added += 1
         # Walk every episode: mark already-downloaded ones completed, and from the

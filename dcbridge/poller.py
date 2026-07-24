@@ -34,6 +34,7 @@ from dcbridge.helpers import (
     sanitize_for_dc_search,
     score_result,
     season_of_episode_key,
+    tv_release_extra_words_ok,
 )
 from dcbridge.util import (
     _HUB_PATH_SEP,
@@ -164,6 +165,7 @@ async def handle_sonarr_event(app: FastAPI, ev) -> None:
             title=title,
             target_dir_fs=target_dir_fs,
             monitored_keys=None,  # season list TBD via Sonarr API; for now: all
+            year=s.get("year"),
         )
         log.info("tracked TV series: %s -> %s", title, target_dir_fs)
         # React immediately (search now) instead of waiting for the next sweep.
@@ -662,6 +664,20 @@ def _select_candidates(
                     item_id, release_name, title,
                 )
                 continue
+            # Same-title different-series guard: words (or a wrong year) wedged
+            # between the series title and the SxxExx marker mean a different
+            # work wearing this series' name — e.g. the older Wallander film
+            # adaptations 'Wallander.Hundarna.I.Riga.S01E01' /
+            # 'Wallander.Villospar.2001.S01E03' for the 2005 series.
+            if not tv_release_extra_words_ok(
+                release_name, title, item.get("year"),
+                cfg.match.year_tolerance, cfg.match.loose_trailing_s,
+            ):
+                log.debug(
+                    "poll %s: skip %r — extra words/wrong year between series title and episode marker",
+                    item_id, release_name,
+                )
+                continue
             eks = episode_keys_from_name(release_name)
             if not eks:
                 continue
@@ -1056,6 +1072,17 @@ async def _poll_item(
                          item_id, len(needed_keys))
         if not needed_keys:
             await state.set_search_backlog(item_id, 0)  # nothing left; resume normal cadence
+            if decision["status"] == "initial" and await state.get_completed_keys(item_id):
+                # Spend the fresh-request probe when the series has completion
+                # history — a re-request of an already-complete series must not
+                # stay 'initial' every sweep (this return skips the stamp below),
+                # re-fetching from Sonarr each time and never settling back to
+                # 'complete', which the force-available flow keys on. A series
+                # with NO history is instead a just-added one whose Sonarr
+                # episode metadata hasn't landed yet: leave the probe live so
+                # the next sweep retries, rather than burning it on an empty
+                # fetch and dropping a 2000s-era series into the 7-day tier.
+                await state.set_last_searched_at(item_id, now_ts)
             log.info("poll %s: all wanted episodes already queued or downloaded — not searching", item_id)
             return False
     elif kind == "movie" and _movie_in_queue(bundles, title, item.get("year")):

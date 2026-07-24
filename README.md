@@ -68,6 +68,10 @@ them just re-opens wrong-grab bugs, so they live in code:
   that merely contains the title mid-name).
 - A TV release must carry the series title as a **contiguous phrase** (the hub
   search is a loose token match, so "Bad Judge" otherwise pulls in "Judge Judy").
+- Between the series title and the `SxxExx` marker a TV release may carry
+  **nothing but the series' own year** (±`match.year_tolerance`) — words or a
+  different year there mean a same-titled *different* series/adaptation wearing
+  this series' name (scene naming puts episode titles after the marker).
 - A movie request never accepts a release carrying a **season/episode** marker
   (that's a TV pack, not the film).
 
