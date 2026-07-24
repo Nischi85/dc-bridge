@@ -104,6 +104,10 @@ poller:
   # releases are exhausted. Gives up after max_stall_retries removals per episode.
   stall_grace_minutes: 30
   max_stall_retries: 4           # 0 disables the fallback
+  # When the canonical title's hub search returns 0 results, retry with up to
+  # this many of TMDB's alternate titles (regional/translated names a scene
+  # release sometimes follows instead) before conceding the sweep.
+  alt_title_search_limit: 3      # 0 disables
   # Content-age back-off. Older CONTENT is searched less often, where age is
   # measured from when the title became available — a movie's release date, or a
   # series' newest still-wanted aired episode — NOT when it was requested. So a
@@ -180,6 +184,10 @@ filters:
 match:
   grab_specials: false   # true = also grab Season 0 (S00) specials/OVAs
   year_tolerance: 1      # a movie's year must be within ±this of the request (0 = exact)
+  # Tolerate a single trailing 's' between a title word and the release's word
+  # ("fotboll" vs "fotbolls-EM" — Swedish-style compound linking a scene release
+  # may render either way). false = title words must match exactly.
+  loose_trailing_s: true
   # Don't search a movie until this many DAYS after its release date (digital, else
   # physical/cinema) — the movie counterpart of poller.air_offset_hours. Scene WEB
   # releases land around the digital date; raise this if they tend to appear later.

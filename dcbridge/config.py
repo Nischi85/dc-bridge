@@ -96,6 +96,10 @@ class PollerCfg(BaseModel):
     # one episode (0 disables the whole fallback).
     stall_grace_minutes: float = 30.0
     max_stall_retries: int = 4
+    # When the canonical title's hub search returns 0 results, retry with up to
+    # this many of TMDB's alternate titles (regional/translated names a scene
+    # release sometimes follows instead) before conceding the sweep. 0 disables.
+    alt_title_search_limit: int = 3
     backoff: list[BackoffTier] = Field(default_factory=list)
     # When False (default), an episode/movie that was once fulfilled is NOT
     # re-downloaded if its file is later deleted — the completion marker keeps it
@@ -158,9 +162,13 @@ class MatchCfg(BaseModel):
     """Match-correctness tuning. Most matching guards (movie title-at-start,
     anchored TV title, movie-vs-TV reject) are deliberately NOT configurable —
     they encode correctness, not taste, and loosening them re-opens wrong-grab
-    bugs. These two have a legitimate spread of user preference."""
+    bugs. The knobs here have a legitimate spread of user preference."""
     grab_specials: bool = False   # True = also grab Season 0 (S00) specials/OVAs
     year_tolerance: int = 1       # a movie's year must be within ±this of the request
+    # Title-word comparison tolerates a single trailing 's' between a title word
+    # and the release's word ("fotboll" vs "fotbolls-EM") — Swedish-style compound
+    # linking a scene release may render either way. False = exact words only.
+    loose_trailing_s: bool = True
     # Don't search a movie until this many DAYS after its release date (digital,
     # else physical/cinema) — the movie equivalent of poller.air_offset_hours.
     # Scene WEB releases land around the digital date; bump this up if they tend to

@@ -67,6 +67,7 @@ class State:
             ("release_date_utc",    "ALTER TABLE tracked_items ADD COLUMN release_date_utc TEXT"),
             ("search_backlog",      "ALTER TABLE tracked_items ADD COLUMN search_backlog INTEGER"),
             ("requested_seasons",   "ALTER TABLE tracked_items ADD COLUMN requested_seasons TEXT"),
+            ("alt_titles",          "ALTER TABLE tracked_items ADD COLUMN alt_titles TEXT"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -117,7 +118,7 @@ class State:
                 "SELECT id, kind, title, target_dir_fs, monitored_keys, request_status,"
                 " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
                 " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
-                " requested_seasons"
+                " requested_seasons, alt_titles"
                 " FROM tracked_items"
             )
             return [
@@ -138,6 +139,7 @@ class State:
                     "release_date_utc": r[13],
                     "search_backlog": r[14] or 0,
                     "requested_seasons": json.loads(r[15]) if r[15] else None,
+                    "alt_titles": json.loads(r[16]) if r[16] else [],
                 }
                 for r in cur.fetchall()
             ]
@@ -338,6 +340,18 @@ class State:
             self.conn.execute(
                 "UPDATE tracked_items SET requested_seasons = ? WHERE id = ?",
                 (json.dumps(sorted(seasons)) if seasons else None, item_id),
+            )
+            self.conn.commit()
+
+    async def set_alt_titles(self, item_id: str, titles: list[str]) -> None:
+        """Store TMDB's alternate titles for this item (from Radarr's/Sonarr's
+        alternateTitles), tried as fallback search queries when the canonical
+        title's hub search comes back empty — scene releases sometimes follow a
+        regional/translated title's wording instead of the canonical one."""
+        async with self._lock:
+            self.conn.execute(
+                "UPDATE tracked_items SET alt_titles = ? WHERE id = ?",
+                (json.dumps(titles or []), item_id),
             )
             self.conn.commit()
 

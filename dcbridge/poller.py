@@ -25,6 +25,7 @@ from dcbridge.helpers import (
     is_adult_release,
     is_foreign_language,
     is_sd_release,
+    loosen_hyphens_for_search,
     movie_title_prefix_ok,
     passes_quality,
     release_matches_title,
@@ -622,14 +623,18 @@ def _select_candidates(
         # but wrong movie "WhatsApp.Obsession.The.Murder...2026" for the movie
         # "Obsession", or "Roccos...Obsession.XXX". Scene abbreviation of long
         # subtitles is tolerated (first 2 words), so "Johan.Falk.GSI..." passes.
-        if kind == "movie" and not release_starts_with_title(release_name, title):
+        if kind == "movie" and not release_starts_with_title(
+            release_name, title, cfg.match.loose_trailing_s
+        ):
             log.debug("poll %s: skip %r — not the requested movie (title not at start)",
                       item_id, release_name)
             continue
         # Reject a different, longer-titled film that merely begins with the same
         # words — e.g. 'The.Odyssey.with.Dan.Snow.2026' for the movie 'The Odyssey'.
         # The release's pre-year tokens must be a prefix of the requested title.
-        if kind == "movie" and not movie_title_prefix_ok(release_name, title):
+        if kind == "movie" and not movie_title_prefix_ok(
+            release_name, title, cfg.match.loose_trailing_s
+        ):
             log.debug("poll %s: skip %r — title has extra words before year, not %r",
                       item_id, release_name, title)
             continue
@@ -1063,7 +1068,7 @@ async def _poll_item(
         log.error("poll_item: path translation failed for %r: %s", target_dir_fs, e)
         return False
 
-    query = sanitize_for_dc_search(title)
+    query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
     if query != title:
         log.info("poll %s: sanitized query %r -> %r", item_id, title, query)
     log.info("poll %s [%s] q=%r target=%s", item_id, kind, query, target_base_smb)
@@ -1092,57 +1097,113 @@ async def _poll_item(
                      item_id, cap, len(deferred), ",".join(deferred))
         batch = eks[:cap]
         total_results = 0
+        # Canonical title first, then alt titles as fallback per episode (only
+        # spent when the canonical title's search misses) — same rationale as
+        # the movie branch below: a scene release's wording can diverge from
+        # TMDB's canonical title.
+        ep_title_variants = [title] + list(item.get("alt_titles") or [])[
+            : max(0, cfg.poller.alt_title_search_limit)
+        ]
         for idx, ek in enumerate(batch):
-            ep_iid = await ad.create_search_instance()
-            if ep_iid is None:
-                continue
-            try:
-                if not await ad.hub_search(ep_iid, f"{query} {ek}"):
+            exclude = await state.get_failed_releases(item_id, ek)
+            for vi, title_variant in enumerate(ep_title_variants):
+                ep_query = query if vi == 0 else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
+                ep_iid = await ad.create_search_instance()
+                if ep_iid is None:
                     continue
-                await asyncio.sleep(cfg.poller.tv_search_settle_seconds)
-                results = await ad.get_results(ep_iid, 0, 500)
-                total_results += len(results)
-                exclude = await state.get_failed_releases(item_id, ek)
-                candidates_by_key = _select_candidates(
-                    results, kind, title, item, cfg, item_priority, {ek}, item_id,
-                    exclude_releases=exclude,
-                )
-                queued += await _queue_candidates(
-                    ad, state, cfg, ep_iid, kind, item_id,
-                    candidates_by_key, in_queue_keys, target_base_smb, item_priority,
-                )
-            finally:
                 try:
-                    await ad.delete_instance(ep_iid)
-                except Exception:
-                    log.debug("delete_instance %s failed (ignored)", ep_iid)
-            # Space out searches so AirDC++'s throttle doesn't drop the next one.
+                    if not await ad.hub_search(ep_iid, f"{ep_query} {ek}"):
+                        continue
+                    await asyncio.sleep(cfg.poller.tv_search_settle_seconds)
+                    results = await ad.get_results(ep_iid, 0, 500)
+                    total_results += len(results)
+                    candidates_by_key = _select_candidates(
+                        results, kind, title_variant, item, cfg, item_priority, {ek}, item_id,
+                        exclude_releases=exclude,
+                    )
+                    if candidates_by_key:
+                        if vi > 0:
+                            log.info("poll %s: %s matched via alternate title %r",
+                                     item_id, ek, title_variant)
+                        queued += await _queue_candidates(
+                            ad, state, cfg, ep_iid, kind, item_id,
+                            candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+                        )
+                        break
+                finally:
+                    try:
+                        await ad.delete_instance(ep_iid)
+                    except Exception:
+                        log.debug("delete_instance %s failed (ignored)", ep_iid)
+                # No match yet — pace out the next attempt (next alt title, or
+                # next episode) so AirDC++'s throttle doesn't drop it.
+                if vi < len(ep_title_variants) - 1:
+                    await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
             if idx < len(batch) - 1:
                 await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
         log.info("poll %s: searched %d episode(s), %d hub result(s), queued %d",
                  item_id, len(batch), total_results, queued)
     else:
-        iid = await ad.create_search_instance()
-        if iid is None:
-            return False
-        try:
-            if not await ad.hub_search(iid, query, extensions=None):
-                return True
-            await asyncio.sleep(8.0)
-            results = await ad.get_results(iid, 0, 500)
-            log.info("poll %s: %d hub result(s)", item_id, len(results))
-            candidates_by_key = _select_candidates(
-                results, kind, title, item, cfg, item_priority, needed_keys, item_id
-            )
-            queued = await _queue_candidates(
-                ad, state, cfg, iid, kind, item_id,
-                candidates_by_key, in_queue_keys, target_base_smb, item_priority,
-            )
-        finally:
+        # Canonical title first, then up to alt_title_search_limit of TMDB's
+        # alternate titles as fallbacks — scene releases sometimes follow a
+        # regional/translated title's wording (word order, compound splits)
+        # instead of the canonical one, so a canonical-title search that finds
+        # nothing doesn't necessarily mean the content isn't on the hubs.
+        title_variants = [title] + list(item.get("alt_titles") or [])[
+            : max(0, cfg.poller.alt_title_search_limit)
+        ]
+        matched_title = title
+        winning_iid = None
+        candidates_by_key: dict[str, list[dict[str, Any]]] = {}
+        attempted = False
+        for vi, title_variant in enumerate(title_variants):
+            variant_query = query if vi == 0 else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
+            iid = await ad.create_search_instance()
+            if iid is None:
+                continue
+            attempted = True
+            keep = False  # True once this instance is the winner (queued after the loop)
             try:
-                await ad.delete_instance(iid)
-            except Exception:
-                log.debug("delete_instance %s failed (ignored)", iid)
+                if not await ad.hub_search(iid, variant_query, extensions=None):
+                    continue
+                await asyncio.sleep(8.0)
+                results = await ad.get_results(iid, 0, 500)
+                log.info(
+                    "poll %s: %d hub result(s) for %r%s",
+                    item_id, len(results), variant_query,
+                    "" if vi == 0 else " (alt title fallback)",
+                )
+                variant_candidates = _select_candidates(
+                    results, kind, title_variant, item, cfg, item_priority, needed_keys, item_id
+                )
+                if variant_candidates:
+                    matched_title, candidates_by_key, winning_iid = title_variant, variant_candidates, iid
+                    keep = True
+                    break
+            finally:
+                if not keep:
+                    try:
+                        await ad.delete_instance(iid)
+                    except Exception:
+                        log.debug("delete_instance %s failed (ignored)", iid)
+            if vi < len(title_variants) - 1:
+                await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
+        if not attempted:
+            return False
+        if matched_title != title:
+            log.info("poll %s: matched via alternate title %r", item_id, matched_title)
+        queued = 0
+        if winning_iid is not None:
+            try:
+                queued = await _queue_candidates(
+                    ad, state, cfg, winning_iid, kind, item_id,
+                    candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+                )
+            finally:
+                try:
+                    await ad.delete_instance(winning_iid)
+                except Exception:
+                    log.debug("delete_instance %s failed (ignored)", winning_iid)
 
     if queued:
         log.info("poll %s: queued %d new key(s) total", item_id, queued)

@@ -47,6 +47,21 @@ def _movie_release_date(m: dict) -> Optional[str]:
     return f"{int(y)}-01-01T00:00:00Z" if y else None
 
 
+def _alt_titles(entity: dict) -> list[str]:
+    """Extract TMDB's alternate titles (e.g. regional/translated names) from a
+    Radarr movie's or Sonarr series' alternateTitles array. Scene releases
+    sometimes follow one of these instead of the canonical title, so the
+    poller retries with them when the canonical title's hub search misses."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in entity.get("alternateTitles") or []:
+        title = (t.get("title") or "").strip()
+        if title and title not in seen:
+            seen.add(title)
+            out.append(title)
+    return out
+
+
 def _named_profile_priority(profile_name: str, by_name: dict, app: str) -> Optional[list]:
     """Resolve quality.profile_name to its priority list. None means 'not using a
     named profile' — fall back to each item's own assigned profile. Warns (once per
@@ -226,6 +241,7 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
                     wanted_keys.append(ekey)
         await state.set_tv_air(f"sonarr:{sid}", air_anchor, next_air)
         await state.set_monitored_keys(f"sonarr:{sid}", wanted_keys)
+        await state.set_alt_titles(f"sonarr:{sid}", _alt_titles(s))
         await state.set_quality_priority(
             f"sonarr:{sid}",
             named_priority if named_priority is not None
@@ -293,6 +309,7 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             else (profiles_by_id.get(m.get("qualityProfileId")) or []),
         )
         await state.set_release_date(f"radarr:{mid}", _movie_release_date(m))
+        await state.set_alt_titles(f"radarr:{mid}", _alt_titles(m))
         added += 1
         if m.get("hasFile"):
             await state.mark_completed(

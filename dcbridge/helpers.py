@@ -75,6 +75,25 @@ def sanitize_for_dc_search(s: str) -> str:
     return s
 
 
+def loosen_hyphens_for_search(s: str) -> str:
+    """Split a sanitized string's internal hyphens into separate search terms
+    (query-construction only — never used for folder naming, which must keep
+    a title's real hyphens intact).
+
+    AirDC++ AND-matches each space-separated query term as its own substring
+    of the release name/path, independent of what's adjacent to it. So a
+    hyphenated compound in the source title (e.g. TMDB's alternate title
+    "EM-krönika") only needs "EM" and "kronika" to each appear somewhere in
+    the release — it doesn't require them to be joined by a literal hyphen,
+    which a scene release may render differently (dot-separated, or not
+    hyphenated at all, e.g. "EM.Kronika"). Keeping the hyphen as one literal
+    token would make an otherwise-correct query miss such a release entirely;
+    splitting it only loosens the hub query, and the existing title-match
+    guards (release_starts_with_title, movie_title_prefix_ok,
+    release_matches_title) still enforce correctness on the results."""
+    return re.sub(r"-", " ", s)
+
+
 def title_to_folder_name(title: str) -> str:
     """A scene-style, dot-separated folder name for `title` (e.g. "Hem till
     Midgård" -> "Hem.till.Midgard"). Reuses sanitize_for_dc_search's ASCII-fold
@@ -328,6 +347,20 @@ def _title_tokens(s: str) -> list[str]:
     return toks
 
 
+def _tokens_equal_loose(a: str, b: str, loose_trailing_s: bool = True) -> bool:
+    """Token equality tolerant of a single trailing 's' on either side — Swedish
+    (and some other languages') compound nouns link with an inserted '-s-'
+    ("fotboll" -> "fotbolls-EM"), so a title's word and a scene release's
+    corresponding word legitimately differ by exactly that letter. Still exact
+    for everything else, so this doesn't turn into general fuzzy matching.
+    `loose_trailing_s=False` (match.loose_trailing_s) makes it plain equality."""
+    if a == b:
+        return True
+    if not loose_trailing_s:
+        return False
+    return a == b + "s" or b == a + "s"
+
+
 def release_matches_title(release_name: str, title: str, anchored: bool = False) -> bool:
     """True if the requested title matches `release_name` as a token phrase.
 
@@ -357,13 +390,15 @@ def release_matches_title(release_name: str, title: str, anchored: bool = False)
     return re.search(pattern, release_name.lower()) is not None
 
 
-def release_starts_with_title(release_name: str, title: str) -> bool:
+def release_starts_with_title(release_name: str, title: str, loose_trailing_s: bool = True) -> bool:
     """True if the release name BEGINS with the movie title, allowing the scene
     name to abbreviate a long title (e.g. 'Johan.Falk.GSI...' for 'Johan Falk:
     GSI - Gruppen...'). A 1-2 word title must appear in full at the start; a
     longer title needs at least its first 2 words. This rejects a release that
     merely CONTAINS the title mid-name (e.g. 'Roccos.World.Feet.Obsession.2.XXX'
-    for the movie 'Obsession')."""
+    for the movie 'Obsession'). With `loose_trailing_s` (match.loose_trailing_s,
+    default on) word comparison tolerates a single trailing 's' (see
+    _tokens_equal_loose) for Swedish-style compound linking."""
     want = _title_tokens(title)
     if not want:
         return True
@@ -372,13 +407,13 @@ def release_starts_with_title(release_name: str, title: str) -> bool:
         rel = rel[1:]
     n = 0
     for wt, rt in zip(want, rel):
-        if wt != rt:
+        if not _tokens_equal_loose(wt, rt, loose_trailing_s):
             break
         n += 1
     return n >= min(len(want), 2) and (len(want) > 2 or n == len(want))
 
 
-def movie_title_prefix_ok(release_name: str, title: str) -> bool:
+def movie_title_prefix_ok(release_name: str, title: str, loose_trailing_s: bool = True) -> bool:
     """Stronger movie guard: the release's title portion — the tokens BEFORE its
     first year token — must be a prefix of the requested title's tokens, not merely
     share its opening words.
@@ -392,7 +427,9 @@ def movie_title_prefix_ok(release_name: str, title: str) -> bool:
     title has no 'with dan snow') while still accepting the abbreviation case
     ('johan falk gsi' IS a prefix of the full title) and the exact match
     ('The.Odyssey.2026'). Yearless releases can't be split this way and pass
-    through — the caller's release_starts_with_title() still applies to them."""
+    through — the caller's release_starts_with_title() still applies to them.
+    With `loose_trailing_s` (match.loose_trailing_s, default on) word comparison
+    tolerates a single trailing 's' (see _tokens_equal_loose)."""
     want = _title_tokens(title)
     if not want:
         return True
@@ -405,7 +442,10 @@ def movie_title_prefix_ok(release_name: str, title: str) -> bool:
         # (e.g. '2001.A.Space.Odyssey'): can't strengthen, leave to starts_with.
         return True
     pre = rel[:yi]
-    return pre == want[: len(pre)]
+    wanted_prefix = want[: len(pre)]
+    return len(pre) == len(wanted_prefix) and all(
+        _tokens_equal_loose(wt, rt, loose_trailing_s) for wt, rt in zip(wanted_prefix, pre)
+    )
 
 
 def is_adult_release(name: str, title: str) -> bool:
