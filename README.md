@@ -22,7 +22,9 @@ extract or serve files itself.
    files should live.
 3. On a schedule, dc-bridge searches your AirDC++ hubs for each active item,
    picks the best release for the item's quality profile, and queues the whole
-   release folder for download.
+   release folder for download. If the canonical title finds nothing, it retries
+   with the title's TMDB alternate titles (`poller.alt_title_search_limit`) —
+   scene releases sometimes follow a regional/translated title's wording.
 4. As downloads land, dc-bridge nudges Radarr/Sonarr to import them, and
    (optionally) flips the Jellyseerr request to *available*.
 
@@ -48,8 +50,11 @@ because it's about matching *correctly*, not taste.
   `The.Danish.Girl`) is never mistaken for a tag.
 - **Match preferences** (`match:`) — `grab_specials` (include Season 0
   specials/OVAs, default off), `year_tolerance` (how far a movie's year may
-  differ from the request, default ±1), and `movie_release_offset_days` (wait
-  this many days after a movie's release date before searching).
+  differ from the request, default ±1), `movie_release_offset_days` (wait
+  this many days after a movie's release date before searching), and
+  `loose_trailing_s` (tolerate a single trailing "s" between a title word and
+  the release's word, e.g. Swedish-style compound linking; default on, off =
+  exact words only).
 
 The bridge also won't search content before it exists: a TV episode is gated
 until it airs (`poller.air_offset_hours`), and a movie until its release date
