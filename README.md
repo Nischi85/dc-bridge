@@ -49,12 +49,19 @@ because it's about matching *correctly*, not taste.
   after the year/episode marker, so a language word in a *title* (e.g.
   `The.Danish.Girl`) is never mistaken for a tag.
 - **Match preferences** (`match:`) — `grab_specials` (include Season 0
-  specials/OVAs, default off), `year_tolerance` (how far a movie's year may
-  differ from the request, default ±1), `movie_release_offset_days` (wait
-  this many days after a movie's release date before searching), and
-  `loose_trailing_s` (tolerate a single trailing "s" between a title word and
-  the release's word, e.g. Swedish-style compound linking; default on, off =
-  exact words only).
+  specials/OVAs, default off), `year_tolerance` (how far a movie's year, or a
+  TV release's year if it carries one, may differ from the request/episode's
+  broadcast year, default ±1), `movie_release_offset_days` (wait this many
+  days after a movie's release date before searching), `loose_trailing_s`
+  (tolerate a single trailing "s" between a title word and the release's word,
+  e.g. Swedish-style compound linking; default on, off = exact words only),
+  `tv_year_guard` (reject a TV release whose carried year doesn't match the
+  specific episode's broadcast year — a yearless release is never rejected by
+  this; default on), and `require_release_tags` (per-item allowlist, keyed by
+  the bridge's item id, e.g. `"sonarr:845": ["SWEDiSH"]` — for a title that
+  collides with a differently-produced same-named show that *arr's own
+  metadata can't tell apart; empty by default, a no-op until you add an
+  entry).
 
 The bridge also won't search content before it exists: a TV episode is gated
 until it airs (`poller.air_offset_hours`), and a movie until its release date

@@ -183,7 +183,16 @@ filters:
 # wrong-grabs; see the "What the bridge filters" section in the README.
 match:
   grab_specials: false   # true = also grab Season 0 (S00) specials/OVAs
-  year_tolerance: 1      # a movie's year must be within ±this of the request (0 = exact)
+  # A movie's year, or (when tv_year_guard is on) a TV release's year if it
+  # carries one, must be within ±this of the request/episode's broadcast year.
+  year_tolerance: 1      # 0 = exact
+  # Reject a TV release that carries a YEAR not matching (±year_tolerance) the
+  # specific episode's broadcast year — catches a same-titled remake produced
+  # in a different year. A release with NO year is never rejected by this
+  # (standard SxxExx naming legitimately omits it); only a present, wrong year
+  # is a signal. Complements require_release_tags below, doesn't replace it —
+  # plenty of wrong-remake releases carry no year at all.
+  tv_year_guard: true
   # Tolerate a single trailing 's' between a title word and the release's word
   # ("fotboll" vs "fotbolls-EM" — Swedish-style compound linking a scene release
   # may render either way). false = title words must match exactly.
@@ -193,3 +202,13 @@ match:
   # releases land around the digital date; raise this if they tend to appear later.
   # 0 = search from the release date. Fractions allowed (0.5 = 12h).
   movie_release_offset_days: 0
+  # Per-item required release tag(s), keyed by the bridge's item id (as shown
+  # in its log lines, e.g. "sonarr:845"). A release for that item must carry
+  # at least one listed tag or it's rejected — for a title that collides with
+  # a differently-produced same-named show (e.g. a foreign original vs. an
+  # English-language remake) that *arr's own metadata can't tell apart. The
+  # id changes if the item is ever removed and re-added in Sonarr/Radarr —
+  # update the key here to match.
+  require_release_tags: {}
+  # require_release_tags:
+  #   "sonarr:845": ["SWEDiSH"]   # Wallander (2005, Swedish) vs. the BBC remake

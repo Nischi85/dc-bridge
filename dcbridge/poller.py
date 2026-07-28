@@ -28,6 +28,7 @@ from dcbridge.helpers import (
     loosen_hyphens_for_search,
     movie_title_prefix_ok,
     passes_quality,
+    release_has_required_tag,
     release_matches_title,
     release_matches_year,
     release_starts_with_title,
@@ -35,6 +36,7 @@ from dcbridge.helpers import (
     score_result,
     season_of_episode_key,
     tv_release_extra_words_ok,
+    tv_release_matches_year,
 )
 from dcbridge.util import (
     _HUB_PATH_SEP,
@@ -619,6 +621,15 @@ def _select_candidates(
         if has_unwanted_subs(release_name):
             log.debug("poll %s: skip %r — unwanted foreign subs", item_id, release_name)
             continue
+        # Per-item required-tag allowlist (match.require_release_tags): for a
+        # title that collides with a differently-produced same-named show, a
+        # release must carry one of the configured tags (e.g. SWEDiSH) or it's
+        # rejected — a no-op for every item not explicitly configured.
+        required_tags = cfg.match.require_release_tags.get(item_id)
+        if required_tags and not release_has_required_tag(release_name, required_tags):
+            log.debug("poll %s: skip %r — missing required tag %s",
+                      item_id, release_name, required_tags)
+            continue
         # Movie title guard: the release must START with the movie title
         # (movies have no anchored-phrase guard like TV). Rejects a different
         # film that merely contains the title mid-name — e.g. the right year
@@ -691,6 +702,19 @@ def _select_candidates(
                 # that's already downloading.
                 if ek not in needed_keys:
                     continue
+                # Per-episode year guard: reject a release whose carried year
+                # doesn't match THIS episode's actual broadcast year — falls
+                # back to the show's overall year if the specific episode's
+                # air date isn't known yet (e.g. right after a fresh add,
+                # before the first full sync populates episode_air_years).
+                if cfg.match.tv_year_guard:
+                    want_year = (item.get("episode_air_years") or {}).get(ek) or item.get("year")
+                    if not tv_release_matches_year(release_name, want_year, cfg.match.year_tolerance):
+                        log.debug(
+                            "poll %s: skip %r — year mismatch for %s (want %s±%s)",
+                            item_id, release_name, ek, want_year, cfg.match.year_tolerance,
+                        )
+                        continue
                 candidates_by_key.setdefault(ek, []).append(
                     {**g, "parent_dir": parent_dir}
                 )

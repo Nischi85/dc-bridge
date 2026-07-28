@@ -68,6 +68,7 @@ class State:
             ("search_backlog",      "ALTER TABLE tracked_items ADD COLUMN search_backlog INTEGER"),
             ("requested_seasons",   "ALTER TABLE tracked_items ADD COLUMN requested_seasons TEXT"),
             ("alt_titles",          "ALTER TABLE tracked_items ADD COLUMN alt_titles TEXT"),
+            ("episode_air_years",   "ALTER TABLE tracked_items ADD COLUMN episode_air_years TEXT"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -118,7 +119,7 @@ class State:
                 "SELECT id, kind, title, target_dir_fs, monitored_keys, request_status,"
                 " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
                 " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
-                " requested_seasons, alt_titles"
+                " requested_seasons, alt_titles, episode_air_years"
                 " FROM tracked_items"
             )
             return [
@@ -140,6 +141,7 @@ class State:
                     "search_backlog": r[14] or 0,
                     "requested_seasons": json.loads(r[15]) if r[15] else None,
                     "alt_titles": json.loads(r[16]) if r[16] else [],
+                    "episode_air_years": json.loads(r[17]) if r[17] else {},
                 }
                 for r in cur.fetchall()
             ]
@@ -352,6 +354,19 @@ class State:
             self.conn.execute(
                 "UPDATE tracked_items SET alt_titles = ? WHERE id = ?",
                 (json.dumps(titles or []), item_id),
+            )
+            self.conn.commit()
+
+    async def set_episode_air_years(self, item_id: str, years: dict[str, int]) -> None:
+        """Store each wanted episode's air year ({"S01E01": 2005, ...}), computed
+        at Sonarr sync from its airDateUtc. Used by the TV year guard
+        (match.tv_year_guard) to reject a release whose year doesn't match the
+        SPECIFIC episode it claims to be — a per-item show year isn't precise
+        enough for a long-running series spanning many broadcast years."""
+        async with self._lock:
+            self.conn.execute(
+                "UPDATE tracked_items SET episode_air_years = ? WHERE id = ?",
+                (json.dumps(years or {}), item_id),
             )
             self.conn.commit()
 

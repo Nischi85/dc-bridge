@@ -230,6 +230,23 @@ def release_matches_year(name: str, want_year: int | None, tolerance: int = 1) -
     return any(abs(y - want_year) <= tolerance for y in years)
 
 
+def tv_release_matches_year(release_name: str, want_year: Optional[int], tolerance: int = 1) -> bool:
+    """True if `release_name` carries no year, OR a year within ±tolerance of
+    `want_year` (the SPECIFIC episode's broadcast year, not the show's start
+    year — a long-running series spans many years, so a per-item year would be
+    too coarse). Unlike release_matches_year (movies), a yearless TV release is
+    NOT rejected — standard SxxExx scene naming legitimately omits the year for
+    ordinary episodes; only a PRESENT, wrong year is a signal something's off
+    (e.g. a same-titled remake produced in a different year, 'Wallander...2008'
+    for a 2005-aired episode). Permissive when want_year is unknown."""
+    if not want_year:
+        return True
+    years = [int(y) for y in _YEAR_RE.findall(release_name)]
+    if not years:
+        return True
+    return any(abs(y - want_year) <= tolerance for y in years)
+
+
 _SD_SOURCE_RE = re.compile(r"\b(?:dvdrip|dvdscr|dvd-?r|dvd|xvid|divx|sdtv|vhsrip|tvrip)\b", re.I)
 
 
@@ -297,6 +314,17 @@ def configure_filters(
     _FOREIGN_SUBS_RE = compile_subs_re(reject_sub_tags)
     _ADULT_TAGS = list(reject_adult_tags)
     _ADULT_RE = compile_dub_re(reject_adult_tags)
+
+
+def release_has_required_tag(release_name: str, required_tags: list[str]) -> bool:
+    """True if `release_name` carries at least one of `required_tags` in its
+    scene-tag region (match.require_release_tags) — same whole-token,
+    case-insensitive matching as the reject_* denylists, just inverted into an
+    allowlist. Permissive (True) when required_tags is empty/unset, so this is
+    a no-op for every item except the ones explicitly configured."""
+    if not required_tags:
+        return True
+    return compile_dub_re(required_tags).search(_scene_tag_region(release_name)) is not None
 
 
 def _scene_tag_region(name: str) -> str:

@@ -164,7 +164,18 @@ class MatchCfg(BaseModel):
     they encode correctness, not taste, and loosening them re-opens wrong-grab
     bugs. The knobs here have a legitimate spread of user preference."""
     grab_specials: bool = False   # True = also grab Season 0 (S00) specials/OVAs
-    year_tolerance: int = 1       # a movie's year must be within ±this of the request
+    # A movie's year, or (when tv_year_guard is on) a TV release's year if it
+    # carries one, must be within ±this of the request/episode's broadcast year.
+    year_tolerance: int = 1
+    # Reject a TV release that carries a YEAR not within year_tolerance of the
+    # specific episode's broadcast year — catches a same-titled remake produced
+    # in a different year (e.g. a 2008 English "Wallander" release grabbed for
+    # a 2005-aired episode of the Swedish original). A release with NO year is
+    # never rejected by this (standard SxxExx naming legitimately omits it);
+    # only a present, wrong year is a signal. Complements, not replaces,
+    # require_release_tags — plenty of wrong-remake releases carry no year at
+    # all and still need a tag override. False disables the guard entirely.
+    tv_year_guard: bool = True
     # Title-word comparison tolerates a single trailing 's' between a title word
     # and the release's word ("fotboll" vs "fotbolls-EM") — Swedish-style compound
     # linking a scene release may render either way. False = exact words only.
@@ -174,6 +185,16 @@ class MatchCfg(BaseModel):
     # Scene WEB releases land around the digital date; bump this up if they tend to
     # appear later. 0 = search from the release date. Fractions allowed (0.5 = 12h).
     movie_release_offset_days: float = 0
+    # Per-item required release tag(s), keyed by the bridge's item id (e.g.
+    # "sonarr:845", as printed in its log lines). A release for that item must
+    # carry at least one of the listed tags (same whole-token, case-insensitive
+    # matching as filters.reject_dub_tags) or it's rejected. For a title that
+    # collides with a differently-produced show of the same name (e.g. a
+    # foreign original vs. an English-language remake, both plainly titled
+    # "Wallander") where *arr's own language metadata can't be trusted to tell
+    # them apart — Sonarr reported originalLanguage=English for the Swedish
+    # 2005 series, so automatic detection isn't an option here.
+    require_release_tags: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class Config(BaseModel):

@@ -206,6 +206,7 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
         air_anchor: str | None = None
         next_air: str | None = None
         wanted_keys: list[str] = []  # monitored, no file, already aired (+offset)
+        episode_years: dict[str, int] = {}  # ekey -> broadcast year, for the TV year guard
         now_e = int(time.time())
         offset = int(cfg.poller.air_offset_hours * 3600)
         if rep.status_code == 200:
@@ -215,6 +216,9 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
                 if season is None or epnum is None:
                     continue
                 ekey = f"S{int(season):02d}E{int(epnum):02d}"
+                air = ep.get("airDateUtc")
+                if air and air[:4].isdigit():
+                    episode_years[ekey] = int(air[:4])
                 if ep.get("hasFile"):
                     await state.mark_completed(
                         f"sonarr:{sid}", ekey, None, "(pre-existing)"
@@ -242,6 +246,7 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
                     wanted_keys.append(ekey)
         await state.set_tv_air(f"sonarr:{sid}", air_anchor, next_air)
         await state.set_monitored_keys(f"sonarr:{sid}", wanted_keys)
+        await state.set_episode_air_years(f"sonarr:{sid}", episode_years)
         await state.set_alt_titles(f"sonarr:{sid}", _alt_titles(s))
         await state.set_quality_priority(
             f"sonarr:{sid}",
