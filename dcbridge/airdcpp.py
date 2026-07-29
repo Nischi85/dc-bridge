@@ -42,6 +42,10 @@ class AirDCPP:
         await self.client.aclose()
 
     async def _login(self) -> None:
+        # A stale Authorization header from a previous (now-expired) session
+        # makes AirDC++ reject this very request with 401 before it even looks
+        # at the body, permanently locking us out of re-authenticating. Clear it.
+        self.client.headers.pop("Authorization", None)
         r = await self.client.post(
             "/api/v1/sessions/authorize",
             json={"username": self.cfg.username, "password": self.cfg.password},
