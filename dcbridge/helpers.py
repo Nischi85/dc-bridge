@@ -154,9 +154,11 @@ def profile_to_priority(profile: dict) -> list[str]:
         else:
             continue
         if src:
-            # res==0 (e.g. plain "DVD") -> match the source alone, since such
-            # releases (DVDRip/XviD) usually carry no resolution token.
-            spec = f"{src} {res}p" if res else src
+            # DVD releases (DVDRip/XviD) never carry a resolution token in
+            # scene names, even though Sonarr's DVD quality reports
+            # resolution=480 -- match the source alone. WEB/HDTV/Bluray
+            # scene names do carry a literal resolution token (720p/1080p/...).
+            spec = src if src == "dvd" else (f"{src} {res}p" if res else src)
             if spec not in specs:
                 specs.append(spec)
     return specs
