@@ -1121,7 +1121,7 @@ async def _poll_item(
 
     query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
     if query != title:
-        log.info("poll %s: sanitized query %r -> %r", item_id, title, query)
+        log.debug("poll %s: sanitized query %r -> %r", item_id, title, query)
     log.info("poll %s [%s] q=%r target=%s", item_id, kind, query, target_base_smb)
 
     # Stamp the search time as early as we know we're committing to one — this
