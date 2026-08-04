@@ -177,6 +177,14 @@ filters:
   # Reject adult/porn releases (whole-token). A request whose own title carries one
   # of these tags is exempt, so an adult title still matches its own releases.
   reject_adult_tags: [XXX]
+  # Reject a release if any file a hub lists for it has one of these extensions
+  # (no leading dot) -- e.g. a DVDR release shipped as a single .img/.iso disc
+  # image instead of playable video files, which Emby can't read without
+  # mounting/extraction. A VIDEO_TS-structured DVDR release has no .img/.iso
+  # files, so it's unaffected. Only catches releases where at least one hub
+  # lists individual files (most do); an opaque whole-folder-only result can't
+  # be checked. Empty list disables this filter.
+  reject_extensions: [img, iso]
 
 # Match preferences. The other matching guards (movie title-at-start, anchored TV
 # title, movie-vs-TV reject) are NOT configurable on purpose — they prevent

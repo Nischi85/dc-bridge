@@ -358,6 +358,22 @@ def has_unwanted_subs(name: str) -> bool:
     return _FOREIGN_SUBS_RE.search(_scene_tag_region(name)) is not None
 
 
+def has_rejected_extension(files: list[dict], extensions: list[str]) -> bool:
+    """True if any file in `files` (raw hub result dicts for one release group)
+    ends with one of `extensions` (filters.reject_extensions), e.g. a DVDR
+    release shipped as a single .img/.iso disc image instead of playable video
+    files. Only sees files a hub actually listed individually — a release
+    reported ONLY as an opaque whole-folder result can't be checked this way."""
+    if not extensions:
+        return False
+    exts = tuple(f".{e.lstrip('.').lower()}" for e in extensions)
+    for f in files:
+        path = (f.get("path") or f.get("name") or "").lower()
+        if path.endswith(exts):
+            return True
+    return False
+
+
 _TITLE_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _LEADING_ARTICLES = ("the", "a", "an")
 

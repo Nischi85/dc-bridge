@@ -156,6 +156,12 @@ class FiltersCfg(BaseModel):
     # Adult/porn scene tags to reject (whole-token). A request whose own title
     # carries one of these tags is exempt so its releases still match.
     reject_adult_tags: list[str] = Field(default_factory=lambda: ["XXX"])
+    # File extensions to reject (no leading dot), e.g. a DVDR release shipped as
+    # a single .img/.iso disc image instead of playable video files -- not
+    # readable by Emby without mounting/extraction. Checked against whichever
+    # files a hub actually lists for the release; a release reported ONLY as an
+    # opaque whole-folder result with no file listing can't be checked.
+    reject_extensions: list[str] = Field(default_factory=lambda: ["img", "iso"])
 
 
 class MatchCfg(BaseModel):

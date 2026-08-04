@@ -21,6 +21,7 @@ from dcbridge.helpers import (
     _utc_iso,
     compute_cadence,
     episode_keys_from_name,
+    has_rejected_extension,
     has_unwanted_subs,
     is_adult_release,
     is_foreign_language,
@@ -603,6 +604,12 @@ def _select_candidates(
             log.debug("poll %s: skip %r — previously stalled release", item_id, release_name)
             continue
         if not passes_quality(release_name, total_size, kind, cfg.quality, item_priority):
+            continue
+        # Disc-image reject: a DVDR release shipped as a single .img/.iso file
+        # isn't playable in Emby without mounting/extraction, unlike a
+        # VIDEO_TS-structured DVDR release (no .img/.iso files, so unaffected).
+        if has_rejected_extension(g["files"], cfg.filters.reject_extensions):
+            log.debug("poll %s: skip %r — disc image file (.img/.iso)", item_id, release_name)
             continue
         # Adult-content reject: scene porn is tagged XXX and often shares a
         # word with a real title (e.g. "Roccos.World.Feet.Obsession.2.XXX").
