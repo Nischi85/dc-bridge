@@ -70,6 +70,13 @@ def sanitize_for_dc_search(s: str) -> str:
     s = s.replace("'", "").replace("’", "").replace("‘", "")
     # Everything else not in the safe set becomes a space.
     s = re.sub(r"[^\w\s.\-]", " ", s, flags=re.UNICODE)
+    # Runs of 2+ dots are title punctuation (an ellipsis, e.g. "Someone Like
+    # You...") rather than the single dots scene names use between words —
+    # collapse to a space. A literal "..." left in the query breaks DC++ hub
+    # search outright (zero results from every hub, even though the same
+    # query without it matches hundreds) since no real filename ever
+    # contains three consecutive dots.
+    s = re.sub(r"\.{2,}", " ", s)
     # Collapse whitespace.
     s = re.sub(r"\s+", " ", s).strip()
     return s
