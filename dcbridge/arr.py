@@ -456,6 +456,15 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
     # monitored (which can include seasons monitored long before this item was
     # ever actively tracked). Applied by the poller via requested_seasons.
     requested_seasons: dict[str, set[int]] = {}
+    # Most recent createdAt across every active request for an item. Jellyseerr
+    # models each requested TV season as its OWN request object with its own
+    # createdAt (a series can accumulate one per season over time), so this must
+    # take the max seen per item_id rather than stamping whatever request happens
+    # to be processed last -- otherwise a freshly-requested season's timestamp
+    # can be overwritten by an older season's request later in the same loop,
+    # silently hiding the new request from the "search a freshly-requested item
+    # immediately" fast path behind the item's oldest season's age instead.
+    request_created_at: dict[str, int] = {}
     for status in js.active_statuses:
         seen_in_status = 0
         skip = 0
@@ -519,7 +528,7 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
                     if created:
                         try:
                             ts = int(datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp())
-                            await state.set_request_created_at(item_id, ts)
+                            request_created_at[item_id] = max(request_created_at.get(item_id, 0), ts)
                         except Exception:
                             pass
                 else:
@@ -535,6 +544,8 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
     await state.clear_request_statuses_except(seen_ids)
     for item_id, seasons in requested_seasons.items():
         await state.set_requested_seasons(item_id, sorted(seasons))
+    for item_id, ts in request_created_at.items():
+        await state.set_request_created_at(item_id, ts)
 
     log.info(
         "jellyseerr sync: per-status=%s matched=%d unmatched=%d",
