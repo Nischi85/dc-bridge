@@ -82,6 +82,24 @@ def sanitize_for_dc_search(s: str) -> str:
     return s
 
 
+_SUBTITLE_SEPARATOR_RE = re.compile(r"\s*[:–—]\s+")  # ": ", " – ", " — "
+
+
+def title_before_subtitle_separator(title: str) -> Optional[str]:
+    """The portion of `title` before its first colon/dash subtitle separator, e.g.
+    "Trustorhärvan – verkligheten bakom Golden Boys" -> "Trustorhärvan". Tried as an
+    extra search variant: AirDC++ AND-matches every space-separated query term, so a
+    query built from the FULL title requires a documentary/subtitle's descriptive tail
+    to appear in the release too — but scene releases commonly drop that tail entirely
+    and keep only the short form. None if `title` has no such separator, or nothing
+    meaningful precedes it."""
+    m = _SUBTITLE_SEPARATOR_RE.search(title)
+    if not m:
+        return None
+    prefix = title[: m.start()].strip()
+    return prefix or None
+
+
 def loosen_hyphens_for_search(s: str) -> str:
     """Split a sanitized string's internal hyphens into separate search terms
     (query-construction only — never used for folder naming, which must keep

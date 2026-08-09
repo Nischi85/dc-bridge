@@ -36,6 +36,7 @@ from dcbridge.helpers import (
     sanitize_for_dc_search,
     score_result,
     season_of_episode_key,
+    title_before_subtitle_separator,
     tv_release_extra_words_ok,
     tv_release_matches_year,
 )
@@ -1155,11 +1156,16 @@ async def _poll_item(
                      item_id, cap, len(deferred), ",".join(deferred))
         batch = eks[:cap]
         total_results = 0
-        # Canonical title first, then alt titles as fallback per episode (only
-        # spent when the canonical title's search misses) — same rationale as
-        # the movie branch below: a scene release's wording can diverge from
-        # TMDB's canonical title.
-        ep_title_variants = [title] + list(item.get("alt_titles") or [])[
+        # Canonical title first, then its pre-subtitle-separator short form (if any),
+        # then alt titles as fallback per episode (only spent when earlier variants
+        # miss) — same rationale as the movie branch below: a scene release's wording
+        # can diverge from TMDB's canonical title, including dropping a subtitle tail
+        # entirely.
+        ep_title_variants = [title]
+        ep_short_title = title_before_subtitle_separator(title)
+        if ep_short_title:
+            ep_title_variants.append(ep_short_title)
+        ep_title_variants += list(item.get("alt_titles") or [])[
             : max(0, cfg.poller.alt_title_search_limit)
         ]
         for idx, ek in enumerate(batch):
@@ -1202,12 +1208,18 @@ async def _poll_item(
         log.info("poll %s: searched %d episode(s), %d hub result(s), queued %d",
                  item_id, len(batch), total_results, queued)
     else:
-        # Canonical title first, then up to alt_title_search_limit of TMDB's
-        # alternate titles as fallbacks — scene releases sometimes follow a
-        # regional/translated title's wording (word order, compound splits)
-        # instead of the canonical one, so a canonical-title search that finds
-        # nothing doesn't necessarily mean the content isn't on the hubs.
-        title_variants = [title] + list(item.get("alt_titles") or [])[
+        # Canonical title first, then its pre-subtitle-separator short form (if any) —
+        # a scene release commonly drops a documentary/subtitle's descriptive tail
+        # entirely (e.g. "Title – long descriptive subtitle" -> "Title.2026...", never
+        # carrying the subtitle words at all), which an AND-matched full-title query
+        # can never match — then up to alt_title_search_limit of TMDB's alternate
+        # titles as further fallbacks, since scene releases sometimes follow a
+        # regional/translated title's wording instead of the canonical one.
+        title_variants = [title]
+        short_title = title_before_subtitle_separator(title)
+        if short_title:
+            title_variants.append(short_title)
+        title_variants += list(item.get("alt_titles") or [])[
             : max(0, cfg.poller.alt_title_search_limit)
         ]
         matched_title = title
