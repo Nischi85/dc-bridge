@@ -79,25 +79,12 @@ def fs_to_smb(fs_path: str, mapping: PathMap) -> str:
     return win + ("\\" + tail.replace("/", "\\") if tail else "")
 
 
-
-
-
-
-# ── *arr webhook handlers ────────────────────────────────────────────────────
-
-
-# Minimal Sonarr/Radarr webhook bodies. These fields are stable in v3+/v4+;
-# unknown fields are ignored (BaseModel default).
-
-
 def _try_smb(fs_path: str, mapping: PathMap) -> Optional[str]:
+    """fs_to_smb, or None when the path isn't under linux_root."""
     try:
         return fs_to_smb(fs_path, mapping)
     except Exception:
         return None
-
-
-# ── Event handlers ───────────────────────────────────────────────────────────
 
 
 def _parent_dir_and_name(path: str) -> tuple[str, str]:

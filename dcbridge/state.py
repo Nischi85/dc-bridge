@@ -235,15 +235,6 @@ class State:
                 (air_anchor, next_air, item_id, air_anchor, next_air),
             )
 
-    async def clear_all_request_statuses(self) -> None:
-        """Set every tracked item's request_status to NULL. Called at the start
-        of a Jellyseerr sync so items that transitioned out of active state
-        (e.g. became 'available') are correctly demoted, not left stale.
-        """
-        async with self._lock:
-            self.conn.execute("UPDATE tracked_items SET request_status = NULL")
-            self.conn.commit()
-
     async def clear_request_statuses_except(self, keep: set[str]) -> None:
         """Demote items no longer active — NULL request_status for every item NOT
         in `keep`, in ONE statement. Used at the END of a Jellyseerr sync instead

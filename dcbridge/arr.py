@@ -232,7 +232,6 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
                     continue
                 if not ep.get("monitored") or int(season) == 0:
                     continue
-                air = ep.get("airDateUtc")
                 if not air:
                     # Undated (TBA) -> treat as available now (sentinel anchor).
                     if air_anchor is None:

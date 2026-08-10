@@ -45,15 +45,6 @@ def setup_logging(level: str, log_file: str = "", max_size_mb: int = 50) -> None
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-# ── Config models ────────────────────────────────────────────────────────────
-
-
-# Config models + loader live in dcbridge/config.py
-
-
-# ── Path translation ─────────────────────────────────────────────────────────
-
-
 def main() -> None:
     cfg = load_config(os.environ.get("CONFIG_PATH", "/config/config.yaml"))
     configure_filters(
