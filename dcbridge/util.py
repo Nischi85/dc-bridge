@@ -1,5 +1,6 @@
 """Shared utils: pooled HTTP client, path/SMB translation, queue/completeness helpers."""
 from __future__ import annotations
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -37,6 +38,21 @@ async def http_session():
     """Yield the process-wide pooled httpx client (connections reused across calls).
     Intentionally does NOT close it — it lives for the lifetime of the process."""
     yield _get_http()
+
+
+_background_tasks: set[asyncio.Task] = set()
+
+
+def spawn_task(coro) -> asyncio.Task:
+    """create_task + a strong reference held until the task finishes. The event
+    loop keeps only a WEAK reference to tasks, so a bare create_task(...) whose
+    result is discarded can be garbage-collected mid-execution (documented
+    asyncio pitfall). The fire-and-forget callers here are the react-immediately
+    search paths — a vanished task looks like the fast path silently not firing."""
+    t = asyncio.create_task(coro)
+    _background_tasks.add(t)
+    t.add_done_callback(_background_tasks.discard)
+    return t
 
 
 def arr_to_fs(arr_path: str, rules: list[PathTranslate]) -> str:

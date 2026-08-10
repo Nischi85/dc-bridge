@@ -20,6 +20,7 @@ from dcbridge.helpers import (
 from dcbridge.util import (
     _try_smb,
     http_session,
+    spawn_task,
 )
 from dcbridge.state import (
     State,
@@ -125,10 +126,14 @@ def make_app(cfg: Config) -> FastAPI:
         iid = await ad.create_search_instance()
         if iid is None:
             return {"error": "create_search_instance failed"}
-        await ad.hub_search(iid, q, extensions=None)
-        await asyncio.sleep(wait)
-        results = await ad.get_results(iid, 0, 100)
-        await ad.delete_instance(iid)
+        try:
+            await ad.hub_search(iid, q, extensions=None)
+            await asyncio.sleep(wait)
+            results = await ad.get_results(iid, 0, 100)
+        finally:
+            # Always release the server-side search instance — an exception
+            # mid-probe would otherwise leak it for the session's lifetime.
+            await ad.delete_instance(iid)
         preview = [
             {
                 "name": r.get("name"),
@@ -150,21 +155,25 @@ def make_app(cfg: Config) -> FastAPI:
         return {"instance": iid, "count": len(results), "results": preview}
 
     @app.post("/poll/{item_id:path}")
-    async def poll_now(item_id: str):
+    async def poll_now(item_id: str, force: bool = False):
         """Run a single poll cycle for one tracked item immediately.
 
         item_id is the bridge's composite id, e.g. "radarr:1234" or "sonarr:5".
         Useful for testing / one-off "go look for this now" without waiting for
-        the next sweep. The fast-skip rule for completed movies still applies.
+        the next sweep. By default the item's normal schedule still applies (a
+        backed-off/gated item silently no-ops); `?force=true` bypasses that
+        schedule gate and searches NOW. Force never bypasses the correctness
+        guards — completed markers, in-queue dedup, and all release filters
+        still apply, so it can't double-grab or mis-grab.
         """
         state: State = app.state.state
-        items = await state.list_items()
-        item = next((i for i in items if i["id"] == item_id), None)
+        item = await state.get_item(item_id)
         if not item:
             raise HTTPException(404, f"no tracked item {item_id}")
         ad: AirDCPP = app.state.airdcpp
-        await poll_item(cfg, state, ad, item)
-        return {"ok": True, "item_id": item_id, "title": item.get("title")}
+        searched = await poll_item(cfg, state, ad, item, force=force)
+        return {"ok": True, "item_id": item_id, "title": item.get("title"),
+                "searched": searched, "forced": force}
 
     @app.post("/sync")
     async def sync_from_arr():
@@ -264,7 +273,7 @@ def make_app(cfg: Config) -> FastAPI:
         log.info("jellyseerr webhook: %s %s", ntype, _truncate(json.dumps(body), 400))
         if ntype in {"", "TEST_NOTIFICATION"}:
             return {"ok": True, "test": ntype == "TEST_NOTIFICATION"}
-        asyncio.create_task(react_to_jellyseerr(app))
+        spawn_task(react_to_jellyseerr(app))
         return {"ok": True}
 
     return app

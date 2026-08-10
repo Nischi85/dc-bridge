@@ -50,6 +50,7 @@ from dcbridge.util import (
     _to_smb_dir,
     arr_to_fs,
     http_session,
+    spawn_task,
 )
 from dcbridge.state import (
     State,
@@ -173,7 +174,7 @@ async def handle_sonarr_event(app: FastAPI, ev) -> None:
         )
         log.info("tracked TV series: %s -> %s", title, target_dir_fs)
         # React immediately (search now) instead of waiting for the next sweep.
-        asyncio.create_task(react_to_request(app, f"sonarr:{sid}"))
+        spawn_task(react_to_request(app, f"sonarr:{sid}"))
     elif et in {"SeriesDelete", "SeriesDeleted"} and ev.series:
         await state.remove_item(f"sonarr:{ev.series.get('id')}")
 
@@ -217,7 +218,7 @@ async def handle_radarr_event(app: FastAPI, ev) -> None:
         )
         log.info("tracked movie: %s -> %s", title, target_dir_fs)
         # React immediately (search now) instead of waiting for the next sweep.
-        asyncio.create_task(react_to_request(app, f"radarr:{mid}"))
+        spawn_task(react_to_request(app, f"radarr:{mid}"))
     elif et in {"MovieDelete", "MovieDeleted"} and ev.movie:
         await state.remove_item(f"radarr:{ev.movie.get('id')}")
 
@@ -555,10 +556,19 @@ async def remove_stalled_tv_bundles(
 def _select_candidates(
     results: list[dict], kind: str, title: str, item: dict, cfg: Config,
     item_priority: list[str], needed_keys: set[str], item_id: str,
-    exclude_releases: set[str] = frozenset(),
+    exclude_releases: set[str] = frozenset(), require_year: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Group raw hub hits into release folders and apply the accept/reject guards
     (quality, adult, foreign-language dub, unwanted subs, title, year, season).
+
+    `require_year` (movies only) disables the normal yearless-SD-release
+    exemption in the year guard below — for a short/truncated title variant
+    (e.g. the pre-subtitle-separator fallback), a 2-word franchise name like
+    "Spider-Man" trivially satisfies the title guards for ANY same-franchise
+    release, so the year becomes the only thing left distinguishing the
+    requested film from every other entry; a yearless release can't be
+    trusted to be the right one and must be rejected outright instead of
+    exempted.
 
     Returns {episode_key (or "movie") -> [candidate release dicts]}. Pure and
     synchronous — it neither touches the network nor state, so all side effects
@@ -661,15 +671,17 @@ def _select_candidates(
             continue
         # Year guard for movies: a sequel request ("...2", 2026) must not grab
         # the same-title older film. DVD/SD releases legitimately omit the year,
-        # so a YEARLESS SD release is allowed; a yearless HD release, or an SD
-        # release with a WRONG year, is rejected.
+        # so a YEARLESS SD release is normally allowed; a yearless HD release, or
+        # an SD release with a WRONG year, is rejected. require_year drops that
+        # exemption (see the require_year note in the docstring above).
         if kind == "movie" and not release_matches_year(
             release_name, item.get("year"), tolerance=cfg.match.year_tolerance
         ):
-            if not (is_sd_release(release_name) and not _YEAR_RE.search(release_name)):
+            if require_year or not (is_sd_release(release_name) and not _YEAR_RE.search(release_name)):
                 log.debug(
-                    "poll %s: skip %r — year mismatch (want %s±%s)",
+                    "poll %s: skip %r — year mismatch (want %s±%s)%s",
                     item_id, release_name, item.get("year"), cfg.match.year_tolerance,
+                    " [strict: short-title fallback]" if require_year else "",
                 )
                 continue
         if kind == "tv":
@@ -921,6 +933,7 @@ async def poll_item(
     cfg: Config, state: State, ad: AirDCPP, item: dict,
     completion: Optional[dict[str, str]] = None,
     bundles: Optional[list[dict]] = None,
+    force: bool = False,
 ) -> bool:
     """Serialize search rounds per item so overlapping webhook reactions can't
     double-grab. Jellyseerr fires several events for one new request (MEDIA_PENDING,
@@ -928,15 +941,19 @@ async def poll_item(
     an empty AirDC++ queue before either queues, so the in-queue guard passes twice
     and two quality tiers of the same movie download at once (seen live: a WEB-DL
     and a BluRay of 'Normal' both queued). Under the lock the second run re-reads a
-    fresh queue and no-ops via the existing _movie_in_queue / cadence guards."""
+    fresh queue and no-ops via the existing _movie_in_queue / cadence guards.
+
+    `force` (manual /poll only) bypasses the schedule gate — back-off and
+    air/release gating — but none of the correctness guards."""
     async with _item_poll_lock(str(item["id"])):
-        return await _poll_item(cfg, state, ad, item, completion, bundles)
+        return await _poll_item(cfg, state, ad, item, completion, bundles, force)
 
 
 async def _poll_item(
     cfg: Config, state: State, ad: AirDCPP, item: dict,
     completion: Optional[dict[str, str]] = None,
     bundles: Optional[list[dict]] = None,
+    force: bool = False,
 ) -> bool:
     """Run one search round for one tracked item; queue matches not yet completed.
 
@@ -1078,8 +1095,11 @@ async def _poll_item(
     # schedule report via compute_cadence so the two never drift.
     decision = compute_cadence(item, cfg, now_ts)
     if not decision["due"]:
-        log.debug("poll %s: %s — %s, skipping", item_id, decision["status"], decision["detail"])
-        return False
+        if not force:
+            log.debug("poll %s: %s — %s, skipping", item_id, decision["status"], decision["detail"])
+            return False
+        log.info("poll %s: forced — bypassing schedule gate (%s, %s)",
+                 item_id, decision["status"], decision["detail"])
     if decision["status"] == "aired":
         log.info("poll %s: episode aired %s — searching now",
                  item_id, item.get("air_anchor_utc"))
@@ -1244,7 +1264,8 @@ async def _poll_item(
                     "" if vi == 0 else " (alt title fallback)",
                 )
                 variant_candidates = _select_candidates(
-                    results, kind, title_variant, item, cfg, item_priority, needed_keys, item_id
+                    results, kind, title_variant, item, cfg, item_priority, needed_keys, item_id,
+                    require_year=(title_variant == short_title),
                 )
                 if variant_candidates:
                     matched_title, candidates_by_key, winning_iid = title_variant, variant_candidates, iid

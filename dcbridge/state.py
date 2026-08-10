@@ -113,38 +113,50 @@ class State:
             self.conn.execute("DELETE FROM failed_releases WHERE item_id = ?", (id_,))
             self.conn.commit()
 
+    _ITEM_COLUMNS = (
+        "id, kind, title, target_dir_fs, monitored_keys, request_status,"
+        " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
+        " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
+        " requested_seasons, alt_titles, episode_air_years"
+    )
+
+    @staticmethod
+    def _row_to_item(r) -> dict:
+        return {
+            "id": r[0],
+            "kind": r[1],
+            "title": r[2],
+            "target_dir_fs": r[3],
+            "monitored_keys": json.loads(r[4] or "[]"),
+            "request_status": r[5],
+            "request_created_at": r[6],
+            "last_searched_at": r[7],
+            "year": r[8],
+            "air_anchor_utc": r[9],
+            "next_air_utc": r[10],
+            "jellyseerr_media_id": r[11],
+            "quality_priority": json.loads(r[12]) if r[12] else [],
+            "release_date_utc": r[13],
+            "search_backlog": r[14] or 0,
+            "requested_seasons": json.loads(r[15]) if r[15] else None,
+            "alt_titles": json.loads(r[16]) if r[16] else [],
+            "episode_air_years": json.loads(r[17]) if r[17] else {},
+        }
+
     async def list_items(self) -> list[dict]:
         async with self._lock:
+            cur = self.conn.execute(f"SELECT {self._ITEM_COLUMNS} FROM tracked_items")
+            return [self._row_to_item(r) for r in cur.fetchall()]
+
+    async def get_item(self, item_id: str) -> Optional[dict]:
+        """One tracked item by id, or None — avoids the full-table list_items
+        scan (+ per-row JSON parsing) for single-item lookups."""
+        async with self._lock:
             cur = self.conn.execute(
-                "SELECT id, kind, title, target_dir_fs, monitored_keys, request_status,"
-                " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
-                " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
-                " requested_seasons, alt_titles, episode_air_years"
-                " FROM tracked_items"
+                f"SELECT {self._ITEM_COLUMNS} FROM tracked_items WHERE id = ?", (item_id,)
             )
-            return [
-                {
-                    "id": r[0],
-                    "kind": r[1],
-                    "title": r[2],
-                    "target_dir_fs": r[3],
-                    "monitored_keys": json.loads(r[4] or "[]"),
-                    "request_status": r[5],
-                    "request_created_at": r[6],
-                    "last_searched_at": r[7],
-                    "year": r[8],
-                    "air_anchor_utc": r[9],
-                    "next_air_utc": r[10],
-                    "jellyseerr_media_id": r[11],
-                    "quality_priority": json.loads(r[12]) if r[12] else [],
-                    "release_date_utc": r[13],
-                    "search_backlog": r[14] or 0,
-                    "requested_seasons": json.loads(r[15]) if r[15] else None,
-                    "alt_titles": json.loads(r[16]) if r[16] else [],
-                    "episode_air_years": json.loads(r[17]) if r[17] else {},
-                }
-                for r in cur.fetchall()
-            ]
+            row = cur.fetchone()
+            return self._row_to_item(row) if row else None
 
     async def set_request_created_at(self, item_id: str, ts: int) -> None:
         async with self._lock:
