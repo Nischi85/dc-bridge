@@ -108,10 +108,13 @@ def make_app(cfg: Config) -> FastAPI:
         active = set(cfg.jellyseerr.active_statuses)
         out = []
         for it in items:
-            it["completed"] = await state.list_completed(it["id"])
-            it["target_dir_smb"] = _try_smb(it["target_dir_fs"], cfg.path_map)
+            # Filter BEFORE the per-item completed-markers query and SMB
+            # translation — with only_active, most of the ~1500+ items are
+            # dropped, so doing that work first was pure waste.
             if only_active and it.get("request_status") not in active:
                 continue
+            it["completed"] = await state.list_completed(it["id"])
+            it["target_dir_smb"] = _try_smb(it["target_dir_fs"], cfg.path_map)
             out.append(it)
         return {"items": out, "count": len(out)}
 

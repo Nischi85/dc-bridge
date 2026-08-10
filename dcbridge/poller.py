@@ -86,7 +86,7 @@ async def react_to_request(app: FastAPI, item_id: str) -> None:
                 await _sync_jellyseerr(cfg, state, http)
         # Re-read so the item carries its freshly-stamped request_status; poll_item
         # reads status off this dict, so a concurrent sync can't race it to NULL.
-        item = next((i for i in await state.list_items() if i["id"] == item_id), None)
+        item = await state.get_item(item_id)
         if item:
             await poll_item(cfg, state, ad, item)
     except Exception:

@@ -158,24 +158,35 @@ class State:
             row = cur.fetchone()
             return self._row_to_item(row) if row else None
 
+    def _update_if_changed(self, sql: str, params: tuple) -> None:
+        """Run an UPDATE whose WHERE clause already excludes no-op writes (the
+        caller appends `AND <col> IS NOT ?`), committing only when a row really
+        changed. The sync loops re-stamp every tracked item every cycle with
+        values that are almost always identical, and every commit is an fsync —
+        without this, each 15-min sync burned thousands of no-op disk writes."""
+        cur = self.conn.execute(sql, params)
+        if cur.rowcount:
+            self.conn.commit()
+
     async def set_request_created_at(self, item_id: str, ts: int) -> None:
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET request_created_at = ? WHERE id = ?",
-                (ts, item_id),
+            self._update_if_changed(
+                "UPDATE tracked_items SET request_created_at = ?"
+                " WHERE id = ? AND request_created_at IS NOT ?",
+                (ts, item_id, ts),
             )
-            self.conn.commit()
 
     async def set_release_date(self, item_id: str, release_date_utc: str | None) -> None:
         """Stamp a movie's release date (ISO UTC) for content-age back-off."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET release_date_utc = ? WHERE id = ?",
-                (release_date_utc, item_id),
+            self._update_if_changed(
+                "UPDATE tracked_items SET release_date_utc = ?"
+                " WHERE id = ? AND release_date_utc IS NOT ?",
+                (release_date_utc, item_id, release_date_utc),
             )
-            self.conn.commit()
 
     async def set_last_searched_at(self, item_id: str, ts: int) -> None:
+        # No changed-value guard: a search stamp is always a new timestamp.
         async with self._lock:
             self.conn.execute(
                 "UPDATE tracked_items SET last_searched_at = ? WHERE id = ?",
@@ -188,11 +199,11 @@ class State:
         the per-poll cap. >0 keeps the item due every sweep (compute_cadence) until
         the backlog drains, instead of dropping into the content-age back-off."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET search_backlog = ? WHERE id = ?",
-                (int(n), item_id),
+            self._update_if_changed(
+                "UPDATE tracked_items SET search_backlog = ?"
+                " WHERE id = ? AND search_backlog IS NOT ?",
+                (int(n), item_id, int(n)),
             )
-            self.conn.commit()
 
     async def add_failed_release(self, item_id: str, key: str, release_name: str) -> None:
         async with self._lock:
@@ -218,11 +229,11 @@ class State:
         air_anchor_utc = newest aired-and-wanted episode; next_air_utc = soonest
         still-to-air wanted episode."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET air_anchor_utc = ?, next_air_utc = ? WHERE id = ?",
-                (air_anchor, next_air, item_id),
+            self._update_if_changed(
+                "UPDATE tracked_items SET air_anchor_utc = ?, next_air_utc = ?"
+                " WHERE id = ? AND (air_anchor_utc IS NOT ? OR next_air_utc IS NOT ?)",
+                (air_anchor, next_air, item_id, air_anchor, next_air),
             )
-            self.conn.commit()
 
     async def clear_all_request_statuses(self) -> None:
         """Set every tracked item's request_status to NULL. Called at the start
@@ -287,11 +298,17 @@ class State:
         self, item_id: str, key: str, bundle_id: Optional[str], release_name: Optional[str]
     ) -> None:
         async with self._lock:
-            self.conn.execute(
+            cur = self.conn.execute(
                 "INSERT OR IGNORE INTO completed (item_id, key, bundle_id, release_name, queued_at)"
                 " VALUES (?,?,?,?,?)",
                 (item_id, key, bundle_id, release_name, int(time.time())),
             )
+            # Already marked (the common resync case — every *arr sync re-marks
+            # every hasFile item): nothing changed, so skip the cleanup DELETE
+            # and the commit entirely. Thousands of no-op fsyncs per sync
+            # otherwise.
+            if not cur.rowcount:
+                return
             # A finished key needs no failed-release history anymore.
             self.conn.execute(
                 "DELETE FROM failed_releases WHERE item_id = ? AND key = ?", (item_id, key)
@@ -328,21 +345,23 @@ class State:
         """Store the item's *arr-quality-profile-derived preference order (ordered
         '<source> <resolution>' specs, most-preferred first)."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET quality_priority = ? WHERE id = ?",
-                (json.dumps(priority or []), item_id),
+            v = json.dumps(priority or [])
+            self._update_if_changed(
+                "UPDATE tracked_items SET quality_priority = ?"
+                " WHERE id = ? AND quality_priority IS NOT ?",
+                (v, item_id, v),
             )
-            self.conn.commit()
 
     async def set_monitored_keys(self, item_id: str, keys: list[str]) -> None:
         """Store a TV series' still-wanted aired episode keys (monitored, no file
         in Sonarr, already aired) so the poller knows the full search set."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET monitored_keys = ? WHERE id = ?",
-                (json.dumps(keys or []), item_id),
+            v = json.dumps(keys or [])
+            self._update_if_changed(
+                "UPDATE tracked_items SET monitored_keys = ?"
+                " WHERE id = ? AND monitored_keys IS NOT ?",
+                (v, item_id, v),
             )
-            self.conn.commit()
 
     async def set_requested_seasons(self, item_id: str, seasons: list[int]) -> None:
         """Store the season numbers actually covered by this TV item's active
@@ -351,11 +370,12 @@ class State:
         (e.g. leftover from before this item was ever actively tracked) but that
         was never actually requested."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET requested_seasons = ? WHERE id = ?",
-                (json.dumps(sorted(seasons)) if seasons else None, item_id),
+            v = json.dumps(sorted(seasons)) if seasons else None
+            self._update_if_changed(
+                "UPDATE tracked_items SET requested_seasons = ?"
+                " WHERE id = ? AND requested_seasons IS NOT ?",
+                (v, item_id, v),
             )
-            self.conn.commit()
 
     async def set_alt_titles(self, item_id: str, titles: list[str]) -> None:
         """Store TMDB's alternate titles for this item (from Radarr's/Sonarr's
@@ -363,11 +383,12 @@ class State:
         title's hub search comes back empty — scene releases sometimes follow a
         regional/translated title's wording instead of the canonical one."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET alt_titles = ? WHERE id = ?",
-                (json.dumps(titles or []), item_id),
+            v = json.dumps(titles or [])
+            self._update_if_changed(
+                "UPDATE tracked_items SET alt_titles = ?"
+                " WHERE id = ? AND alt_titles IS NOT ?",
+                (v, item_id, v),
             )
-            self.conn.commit()
 
     async def set_episode_air_years(self, item_id: str, years: dict[str, int]) -> None:
         """Store each wanted episode's air year ({"S01E01": 2005, ...}), computed
@@ -376,18 +397,19 @@ class State:
         SPECIFIC episode it claims to be — a per-item show year isn't precise
         enough for a long-running series spanning many broadcast years."""
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET episode_air_years = ? WHERE id = ?",
-                (json.dumps(years or {}), item_id),
+            v = json.dumps(years or {})
+            self._update_if_changed(
+                "UPDATE tracked_items SET episode_air_years = ?"
+                " WHERE id = ? AND episode_air_years IS NOT ?",
+                (v, item_id, v),
             )
-            self.conn.commit()
 
     async def set_jellyseerr_media_id(self, item_id: str, media_id: Optional[int]) -> None:
         async with self._lock:
-            self.conn.execute(
-                "UPDATE tracked_items SET jellyseerr_media_id = ? WHERE id = ?",
-                (media_id, item_id),
+            self._update_if_changed(
+                "UPDATE tracked_items SET jellyseerr_media_id = ?"
+                " WHERE id = ? AND jellyseerr_media_id IS NOT ?",
+                (media_id, item_id, media_id),
             )
-            self.conn.commit()
 
 

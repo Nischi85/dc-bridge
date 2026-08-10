@@ -180,10 +180,15 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             s["path"] = routed
         # Fix a non-scene-safe folder name (e.g. non-ASCII "Midgård") before
         # deriving the download target, same spot as children-routing above.
-        fixed = await reconcile_series_ascii_path(cfg, f"sonarr:{sid}")
-        if fixed:
-            s["path"] = fixed
+        # Gate on the folder name already in hand: reconcile re-fetches the
+        # series itself, so calling it unconditionally cost one Sonarr GET per
+        # series per sync for a condition that is almost never true.
         arr_path = s.get("path") or ""
+        if arr_path and not folder_name_is_scene_safe(Path(arr_path).name):
+            fixed = await reconcile_series_ascii_path(cfg, f"sonarr:{sid}")
+            if fixed:
+                s["path"] = fixed
+                arr_path = fixed
         if not arr_path:
             log.warning("sonarr sync: series %s (%s) has no path; skipping", sid, title)
             skipped += 1
