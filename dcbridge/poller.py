@@ -117,7 +117,21 @@ async def react_to_jellyseerr(app: FastAPI) -> None:
                     await auto_approve_requests(cfg, http)
                 except Exception:
                     log.exception("react_to_jellyseerr: auto-approve failed")
-                await _sync_jellyseerr(cfg, state, http)
+                result = await _sync_jellyseerr(cfg, state, http)
+                # Jellyseerr can fire this webhook a moment before the request's
+                # media object has externalServiceId linked back to the *arr
+                # series/movie (seen when re-requesting a title *arr already has,
+                # e.g. after "clear data"), which makes that item unmatched on
+                # this pass. Retry once after a short delay instead of leaving it
+                # to wait out the full periodic sync interval.
+                if result.get("unmatched"):
+                    await asyncio.sleep(5)
+                    result = await _sync_jellyseerr(cfg, state, http)
+                    if result.get("unmatched"):
+                        log.info(
+                            "react_to_jellyseerr: still unmatched=%d after retry",
+                            result["unmatched"],
+                        )
         for item in await state.list_items():
             if not item.get("request_status"):
                 continue
