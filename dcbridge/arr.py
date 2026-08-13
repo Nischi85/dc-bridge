@@ -153,6 +153,17 @@ async def route_children_series(
 async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> dict:
     """Pull all monitored series from sonarr, register as tracked items, and
     mark each already-downloaded episode as completed.
+
+    A series with nothing currently wanted (no monitored-missing aired episode)
+    and nothing scheduled (no known next air date, not even an undated TBA
+    placeholder) is dropped instead of tracked: whatever was requested is fully
+    delivered, and there's no confirmed future content to wait for. This is
+    re-evaluated from Sonarr's live episode list every sync, so it's not a
+    one-way door — the moment a new season is actually requested and Sonarr
+    starts monitoring real (or TBA) episodes for it, the series is picked back
+    up automatically on the next sync. An ongoing/mid-season show never hits
+    this: it always has either an aired-but-missing episode or a next_air date
+    until its current run is fully downloaded.
     """
     url = cfg.sonarr.url.rstrip("/")
     key = cfg.sonarr.api_key
@@ -166,12 +177,14 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
     named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "sonarr")
     added = 0
     skipped = 0
+    dropped_complete = 0
     pre_completed = 0
     for s in series_list:
         if not s.get("monitored"):
             skipped += 1
             continue
         sid = s["id"]
+        item_id = f"sonarr:{sid}"
         title = s.get("title") or "?"
         # Children's-genre routing: relocate the series to the kids' Sonarr root
         # before we derive the target, so the download nests under it.
@@ -185,7 +198,7 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
         # series per sync for a condition that is almost never true.
         arr_path = s.get("path") or ""
         if arr_path and not folder_name_is_scene_safe(Path(arr_path).name):
-            fixed = await reconcile_series_ascii_path(cfg, f"sonarr:{sid}")
+            fixed = await reconcile_series_ascii_path(cfg, item_id)
             if fixed:
                 s["path"] = fixed
                 arr_path = fixed
@@ -194,8 +207,79 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             skipped += 1
             continue
         target_dir_fs = arr_to_fs(arr_path, cfg.path_translate)
+
+        # Walk every episode BEFORE deciding whether to (keep) track this series:
+        # mark already-downloaded ones completed, and from the monitored-but-missing
+        # ones derive the air-date gate — air_anchor_utc = newest wanted episode
+        # that has ALREADY aired; next_air_utc = soonest wanted episode still to
+        # air. Season 0 specials are ignored (never queued).
+        rep = await http.get(f"{url}/api/v3/episode", params={"seriesId": sid}, headers=h)
+        if rep.status_code != 200:
+            # Can't confirm completion OR outstanding work from a failed fetch —
+            # touching nothing (vs. a prior stale bug that silently zeroed
+            # air_anchor/next_air/wanted_keys here) avoids both a false-complete
+            # eviction and a false-empty search set on a transient Sonarr hiccup.
+            log.warning(
+                "sonarr sync: episode fetch for %s (%s) -> %s; leaving tracking state untouched",
+                sid, title, rep.status_code,
+            )
+            skipped += 1
+            continue
+
+        air_anchor: str | None = None
+        next_air: str | None = None
+        wanted_keys: list[str] = []  # monitored, no file, already aired (+offset)
+        episode_years: dict[str, int] = {}  # ekey -> broadcast year, for the TV year guard
+        now_e = int(time.time())
+        offset = int(cfg.poller.air_offset_hours * 3600)
+        for ep in rep.json():
+            season = ep.get("seasonNumber")
+            epnum = ep.get("episodeNumber")
+            if season is None or epnum is None:
+                continue
+            ekey = f"S{int(season):02d}E{int(epnum):02d}"
+            air = ep.get("airDateUtc")
+            if air and air[:4].isdigit():
+                episode_years[ekey] = int(air[:4])
+            if ep.get("hasFile"):
+                await state.mark_completed(item_id, ekey, None, "(pre-existing)")
+                pre_completed += 1
+                continue
+            if not ep.get("monitored") or int(season) == 0:
+                continue
+            if not air:
+                # Undated (TBA) -> treat as available now (sentinel anchor).
+                if air_anchor is None:
+                    air_anchor = _EPOCH_ISO
+                wanted_keys.append(ekey)
+                continue
+            # Searchable only at airdate + configured offset.
+            eff_e = _iso_to_epoch(air) + offset
+            eff = _utc_iso(eff_e)
+            if eff_e > now_e:
+                if next_air is None or eff < next_air:
+                    next_air = eff
+            else:
+                if air_anchor is None or eff > air_anchor:
+                    air_anchor = eff
+                wanted_keys.append(ekey)
+
+        if not wanted_keys and next_air is None:
+            # Nothing outstanding, nothing scheduled: whatever was requested is
+            # fully delivered and no future season is known/requested yet. Drop
+            # it — see docstring for why this isn't a one-way door.
+            if await state.get_item(item_id):
+                await state.remove_item(item_id)
+                log.info(
+                    "sonarr sync: %s fully delivered, nothing scheduled -> dropped from tracking",
+                    title,
+                )
+            dropped_complete += 1
+            skipped += 1
+            continue
+
         await state.add_item(
-            id_=f"sonarr:{sid}",
+            id_=item_id,
             kind="tv",
             title=title,
             target_dir_fs=target_dir_fs,
@@ -203,72 +287,39 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             year=s.get("year"),
         )
         added += 1
-        # Walk every episode: mark already-downloaded ones completed, and from the
-        # monitored-but-missing ones derive the air-date gate — air_anchor_utc =
-        # newest wanted episode that has ALREADY aired; next_air_utc = soonest
-        # wanted episode still to air. Season 0 specials are ignored (never queued).
-        rep = await http.get(f"{url}/api/v3/episode", params={"seriesId": sid}, headers=h)
-        air_anchor: str | None = None
-        next_air: str | None = None
-        wanted_keys: list[str] = []  # monitored, no file, already aired (+offset)
-        episode_years: dict[str, int] = {}  # ekey -> broadcast year, for the TV year guard
-        now_e = int(time.time())
-        offset = int(cfg.poller.air_offset_hours * 3600)
-        if rep.status_code == 200:
-            for ep in rep.json():
-                season = ep.get("seasonNumber")
-                epnum = ep.get("episodeNumber")
-                if season is None or epnum is None:
-                    continue
-                ekey = f"S{int(season):02d}E{int(epnum):02d}"
-                air = ep.get("airDateUtc")
-                if air and air[:4].isdigit():
-                    episode_years[ekey] = int(air[:4])
-                if ep.get("hasFile"):
-                    await state.mark_completed(
-                        f"sonarr:{sid}", ekey, None, "(pre-existing)"
-                    )
-                    pre_completed += 1
-                    continue
-                if not ep.get("monitored") or int(season) == 0:
-                    continue
-                if not air:
-                    # Undated (TBA) -> treat as available now (sentinel anchor).
-                    if air_anchor is None:
-                        air_anchor = _EPOCH_ISO
-                    wanted_keys.append(ekey)
-                    continue
-                # Searchable only at airdate + configured offset.
-                eff_e = _iso_to_epoch(air) + offset
-                eff = _utc_iso(eff_e)
-                if eff_e > now_e:
-                    if next_air is None or eff < next_air:
-                        next_air = eff
-                else:
-                    if air_anchor is None or eff > air_anchor:
-                        air_anchor = eff
-                    wanted_keys.append(ekey)
-        await state.set_tv_air(f"sonarr:{sid}", air_anchor, next_air)
-        await state.set_monitored_keys(f"sonarr:{sid}", wanted_keys)
-        await state.set_episode_air_years(f"sonarr:{sid}", episode_years)
-        await state.set_alt_titles(f"sonarr:{sid}", _alt_titles(s))
+        await state.set_tv_air(item_id, air_anchor, next_air)
+        await state.set_monitored_keys(item_id, wanted_keys)
+        await state.set_episode_air_years(item_id, episode_years)
+        await state.set_alt_titles(item_id, _alt_titles(s))
         await state.set_quality_priority(
-            f"sonarr:{sid}",
+            item_id,
             named_priority if named_priority is not None
             else (profiles_by_id.get(s.get("qualityProfileId")) or []),
         )
     log.info(
-        "sonarr sync: %d series tracked, %d skipped, %d episodes pre-marked completed",
+        "sonarr sync: %d series tracked, %d skipped (%d dropped as fully delivered), %d episodes pre-marked completed",
         added,
         skipped,
+        dropped_complete,
         pre_completed,
     )
-    return {"tracked": added, "skipped": skipped, "pre_completed_episodes": pre_completed}
+    return {
+        "tracked": added,
+        "skipped": skipped,
+        "dropped_complete": dropped_complete,
+        "pre_completed_episodes": pre_completed,
+    }
 
 
 async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> dict:
     """Pull all monitored movies from radarr, register as tracked items, and
     mark already-downloaded movies as completed.
+
+    A movie that already has a file is dropped instead of tracked: unlike a TV
+    series, a movie never gets "another season" — once it's on disk there is
+    nothing left this bridge could ever usefully search for again. (The poller
+    already treated a completed movie as a permanent no-op via the completed-table
+    fast-skip; this just stops it from also occupying a slot in the tracked list.)
     """
     url = cfg.radarr.url.rstrip("/")
     key = cfg.radarr.api_key
@@ -282,13 +333,23 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
     named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "radarr")
     added = 0
     skipped = 0
+    dropped_complete = 0
     pre_completed = 0
     for m in movies:
         if not m.get("monitored"):
             skipped += 1
             continue
         mid = m["id"]
+        item_id = f"radarr:{mid}"
         title = m.get("title") or "?"
+        if m.get("hasFile"):
+            if await state.get_item(item_id):
+                await state.remove_item(item_id)
+                log.info("radarr sync: %s already downloaded -> dropped from tracking", title)
+            dropped_complete += 1
+            pre_completed += 1
+            skipped += 1
+            continue
         # Children's-genre routing: relocate the movie to the kids' Radarr root
         # before we derive the target, so the download lands under it.
         routed = await route_children_movie(url, h, http, cfg.children_routing, m)
@@ -306,7 +367,7 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             continue
         target_dir_fs = arr_to_fs(arr_root, cfg.path_translate)
         await state.add_item(
-            id_=f"radarr:{mid}",
+            id_=item_id,
             kind="movie",
             title=title,
             target_dir_fs=target_dir_fs,
@@ -314,25 +375,26 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             year=m.get("year"),
         )
         await state.set_quality_priority(
-            f"radarr:{mid}",
+            item_id,
             named_priority if named_priority is not None
             else (profiles_by_id.get(m.get("qualityProfileId")) or []),
         )
-        await state.set_release_date(f"radarr:{mid}", _movie_release_date(m))
-        await state.set_alt_titles(f"radarr:{mid}", _alt_titles(m))
+        await state.set_release_date(item_id, _movie_release_date(m))
+        await state.set_alt_titles(item_id, _alt_titles(m))
         added += 1
-        if m.get("hasFile"):
-            await state.mark_completed(
-                f"radarr:{mid}", "movie", None, "(pre-existing)"
-            )
-            pre_completed += 1
     log.info(
-        "radarr sync: %d movies tracked, %d skipped, %d pre-marked completed",
+        "radarr sync: %d movies tracked, %d skipped (%d dropped as already downloaded), %d pre-marked completed",
         added,
         skipped,
+        dropped_complete,
         pre_completed,
     )
-    return {"tracked": added, "skipped": skipped, "pre_completed_movies": pre_completed}
+    return {
+        "tracked": added,
+        "skipped": skipped,
+        "dropped_complete": dropped_complete,
+        "pre_completed_movies": pre_completed,
+    }
 
 
 async def _count_requested_episodes(
