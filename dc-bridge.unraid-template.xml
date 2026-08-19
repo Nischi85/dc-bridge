@@ -37,6 +37,11 @@
       <ContainerDir>/mnt/cache/dc-bridge</ContainerDir>
       <Mode>rw</Mode>
     </Volume>
+    <Volume>
+      <HostDir>/mnt/zzd/share/fin</HostDir>
+      <ContainerDir>/mnt/zzd/share/fin</ContainerDir>
+      <Mode>ro</Mode>
+    </Volume>
   </Data>
   <Environment>
     <Variable>
@@ -49,5 +54,6 @@
   <Config Name="WebUI / Webhook port" Target="8000" Default="8000" Mode="tcp" Description="Inbound webhook endpoint for Sonarr/Radarr and the bridge's own status/sync endpoints." Type="Port" Display="always" Required="true" Mask="false">8000</Config>
   <Config Name="Config directory" Target="/config" Default="/mnt/cache/appdata/dc-bridge" Mode="rw" Description="Persistent config.yaml + state.db live here." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/dc-bridge</Config>
   <Config Name="Log directory" Target="/mnt/cache/dc-bridge" Default="/mnt/cache/dc-bridge" Mode="rw" Description="Where the bridge writes its rotating log file (logging.log_file in config.yaml points here)." Type="Path" Display="always" Required="false" Mask="false">/mnt/cache/dc-bridge</Config>
+  <Config Name="Media storage (fs_watch, read-only)" Target="/mnt/zzd/share/fin" Default="/mnt/zzd/share/fin" Mode="ro" Description="Real media storage, mounted read-only so the bridge can detect out-of-band deletions (fs_watch in config.yaml). Must match fs_watch.watch_root exactly. Remove this mount if fs_watch.enabled is false." Type="Path" Display="always" Required="false" Mask="false">/mnt/zzd/share/fin</Config>
   <Config Name="CONFIG_PATH" Target="CONFIG_PATH" Default="/config/config.yaml" Mode="" Description="Where the bridge reads its config inside the container." Type="Variable" Display="always" Required="true" Mask="false">/config/config.yaml</Config>
 </Container>

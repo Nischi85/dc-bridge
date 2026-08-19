@@ -163,6 +163,26 @@ and `*.log` are gitignored).
    curl -X POST http://<bridge-ip>:8000/sync
    ```
 
+7. **(Optional) Enable fs_watch** if Sonarr/Radarr's library is a FUSE view
+   (e.g. a rargate/rar2fs mount) that can't be deleted through directly. In
+   that setup, deleting a bad/wrong-language release has to happen on the
+   *real* backing storage — but *arr never sees that deletion, so its hasFile
+   record stays stale forever and the bridge never re-tracks the item. With
+   `fs_watch` enabled, the bridge watches the real storage itself and fires a
+   targeted rescan the moment something under it is deleted, so *arr catches
+   up and the item falls back into the normal search flow with no manual
+   rescan step. Bind-mount the real path read-only and point `watch_root` at
+   the exact same path in `config.yaml`:
+   ```
+   -v /mnt/zzd/share/fin:/mnt/zzd/share/fin:ro
+   ```
+   ```yaml
+   fs_watch:
+     enabled: true
+     watch_root: /mnt/zzd/share/fin
+   ```
+   Not needed if *arr's library sits on storage it can delete from directly.
+
 ## unRAID GUI template
 
 Copy `dc-bridge.unraid-template.xml` into

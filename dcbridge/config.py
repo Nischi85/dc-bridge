@@ -113,6 +113,31 @@ class AutoSyncCfg(BaseModel):
     interval_seconds: int = 900  # 0 disables
 
 
+class FsWatchCfg(BaseModel):
+    """Watch the REAL media storage (not the *arr-visible path) for out-of-band
+    deletions — e.g. a manual rm of a wrong-language release on rargate/rar2fs
+    backed storage, which Radarr/Sonarr can never notice themselves because they
+    only see the FUSE-mounted virtual view and that layer doesn't support
+    unlink(). On a detected deletion the bridge triggers a targeted rescan so
+    *arr's hasFile flips to false and the item re-enters the normal sync/search
+    flow on its own — no manual "remember to rescan" step.
+
+    Disabled by default: needs watch_root bind-mounted read-only into the
+    container (this is a real host path, not translated through path_translate
+    — point it at the same fs_prefix path_translate already resolves to, e.g.
+    /mnt/zzd/share/fin) and the `watchfiles` dependency."""
+    enabled: bool = False
+    watch_root: str = ""
+    # How long a burst of delete events for the same item is allowed to settle
+    # before firing ONE rescan (watchfiles' own batching debounce, in seconds —
+    # a whole-folder rm fires one event per file, not one for the folder).
+    debounce_seconds: float = 5.0
+    # How often the real-path -> item_id index (built from *arr's own path/
+    # episodefile records) is rebuilt, so a movie/series added since the last
+    # rebuild is still matchable.
+    reindex_interval_seconds: int = 900
+
+
 class LoggingCfg(BaseModel):
     """File logging, on top of stdout (docker logs). Empty log_file = stdout only.
     The file resets on each start and rotates by size."""
@@ -213,6 +238,7 @@ class Config(BaseModel):
     quality: QualityCfg
     poller: PollerCfg = PollerCfg()
     auto_sync: AutoSyncCfg = AutoSyncCfg()
+    fs_watch: FsWatchCfg = FsWatchCfg()
     jellyseerr: JellyseerrCfg = JellyseerrCfg()
     children_routing: ChildrenRoutingCfg = ChildrenRoutingCfg()
     logging: LoggingCfg = LoggingCfg()

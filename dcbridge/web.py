@@ -43,6 +43,9 @@ from dcbridge.poller import (
     react_to_jellyseerr,
     write_schedule_report,
 )
+from dcbridge.watcher import (
+    fs_watch_loop,
+)
 
 
 class SonarrWebhook(BaseModel):
@@ -74,16 +77,20 @@ async def lifespan(app: FastAPI):
     auto_sync_task: Optional[asyncio.Task] = None
     if cfg.auto_sync.interval_seconds > 0:
         auto_sync_task = asyncio.create_task(auto_sync_loop(app))
+    fs_watch_task: Optional[asyncio.Task] = None
+    if cfg.fs_watch.enabled:
+        fs_watch_task = asyncio.create_task(fs_watch_loop(app))
     log.info(
-        "dc-bridge ready: webhook on :%s, polling every %ss, auto-sync every %ss",
+        "dc-bridge ready: webhook on :%s, polling every %ss, auto-sync every %ss, fs-watch %s",
         cfg.bridge.port,
         cfg.poller.interval_seconds,
         cfg.auto_sync.interval_seconds,
+        "on" if cfg.fs_watch.enabled else "off",
     )
     try:
         yield
     finally:
-        for t in (poller_task, auto_sync_task):
+        for t in (poller_task, auto_sync_task, fs_watch_task):
             if t is not None:
                 t.cancel()
                 try:

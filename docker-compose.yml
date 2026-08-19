@@ -15,6 +15,9 @@ services:
     volumes:
       - /mnt/cache/appdata/dc-bridge:/config
       - /mnt/cache/dc-bridge:/mnt/cache/dc-bridge
+      # Read-only: real media storage, for fs_watch (out-of-band delete detection).
+      # Must match config.yaml's fs_watch.watch_root exactly. Omit both if unused.
+      - /mnt/zzd/share/fin:/mnt/zzd/share/fin:ro
     environment:
       - CONFIG_PATH=/config/config.yaml
     restart: unless-stopped

@@ -131,6 +131,22 @@ poller:
 auto_sync:
   interval_seconds: 900
 
+# Watch the REAL media storage (the fs_prefix side of path_translate, not the
+# *arr-visible path) for out-of-band deletions — e.g. a manual rm of a
+# wrong-language/bad release on storage *arr can't delete through itself (a
+# rar2fs/rargate-style FUSE view with no unlink() support is the motivating
+# case, but this works for any storage *arr can't write to). Without this,
+# *arr's hasFile record for a manually-deleted file stays stale forever and
+# the bridge never re-tracks or re-searches it. watch_root must be
+# bind-mounted read-only into the container at this same path:
+#   -v /mnt/zzd/share/fin:/mnt/zzd/share/fin:ro
+# Disabled by default since it needs that extra mount + the watchfiles dep.
+fs_watch:
+  enabled: false
+  watch_root: ""
+  # debounce_seconds: 5.0
+  # reindex_interval_seconds: 900
+
 # Route children's content to dedicated *arr root folders by genre. A movie/series
 # carrying any listed genre is relocated (metadata move, moveFiles=false — files are
 # never touched) to the matching root, so its download and *arr management land

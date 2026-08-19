@@ -43,6 +43,10 @@ def setup_logging(level: str, log_file: str = "", max_size_mb: int = 50) -> None
     # httpx logs one INFO line per API call ("HTTP Request: GET ... 200 OK"),
     # which floods the log — the bridge makes hundreds of *arr calls per sync.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # watchfiles (fs_watch) logs one INFO line per raw filesystem event it sees,
+    # separate from and much noisier than dc_bridge's own fs_watch.* log lines —
+    # a single download's file churn floods this at INFO. WARNING+ only.
+    logging.getLogger("watchfiles").setLevel(logging.WARNING)
 
 
 def main() -> None:
