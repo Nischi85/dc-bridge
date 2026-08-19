@@ -67,9 +67,27 @@ from dcbridge.arr import (
     mark_jellyseerr_available,
     reconcile_movie_path,
     reconcile_series_ascii_path,
+    resync_one_movie,
+    resync_one_series,
     sonarr_monitored_missing_keys,
     trigger_arr_rescan,
 )
+
+
+async def _resync_one_item(cfg: Config, state: State, item_id: str) -> None:
+    """Force a fresh, single-item Sonarr/Radarr sync ahead of a reactive poll —
+    see resync_one_series/resync_one_movie: a new/changed request must supersede
+    the periodic ~15 min sync, not wait for it. Best-effort: logged, never raised,
+    so a resync hiccup falls back to whatever poll_item already does with
+    (possibly stale) cached state instead of aborting the reaction."""
+    prefix, _, sid = item_id.partition(":")
+    try:
+        if prefix == "sonarr":
+            await resync_one_series(cfg, state, sid)
+        elif prefix == "radarr":
+            await resync_one_movie(cfg, state, sid)
+    except Exception:
+        log.exception("_resync_one_item %s failed", item_id)
 
 
 async def react_to_request(app: FastAPI, item_id: str) -> None:
@@ -84,8 +102,13 @@ async def react_to_request(app: FastAPI, item_id: str) -> None:
         if cfg.jellyseerr.url and cfg.jellyseerr.api_key:
             async with http_session() as http:
                 await _sync_jellyseerr(cfg, state, http)
-        # Re-read so the item carries its freshly-stamped request_status; poll_item
-        # reads status off this dict, so a concurrent sync can't race it to NULL.
+        # Supersede the periodic sync: force this one item's Sonarr/Radarr state
+        # current right now rather than trusting whatever the last ~15 min sync
+        # cached, so poll_item never has to fall back on stale monitored_keys.
+        await _resync_one_item(cfg, state, item_id)
+        # Re-read so the item carries its freshly-stamped request_status AND the
+        # resync above; poll_item reads both off this dict, so a concurrent sync
+        # can't race it to NULL and the resync isn't wasted on a stale copy.
         item = await state.get_item(item_id)
         if item:
             await poll_item(cfg, state, ad, item)
@@ -151,7 +174,13 @@ async def react_to_jellyseerr(app: FastAPI) -> None:
                     "jellyseerr react: searching freshly-requested %s (%s)",
                     item["id"], item.get("title"),
                 )
-                await poll_item(cfg, state, ad, item)
+                # Supersede the periodic sync for this one item, same as
+                # react_to_request — a freshly-requested item must not search
+                # against whatever monitored_keys the last ~15 min sync happened
+                # to have cached; re-read after so poll_item sees the fresh copy.
+                await _resync_one_item(cfg, state, item["id"])
+                fresh = await state.get_item(item["id"]) or item
+                await poll_item(cfg, state, ad, fresh)
     except Exception:
         log.exception("react_to_jellyseerr failed")
 

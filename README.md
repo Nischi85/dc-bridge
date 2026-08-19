@@ -153,7 +153,9 @@ and `*.log` are gitignored).
      `Request Automatically Approved`
    - JSON Payload: leave the default (it includes `notification_type`)
    - Enable the agent. On any request event the bridge approves it (if needed),
-     re-syncs, and immediately searches the freshly-requested item.
+     re-syncs Jellyseerr's status, force-refreshes that item's Sonarr/Radarr
+     data (superseding whatever the periodic ~15 min sync last cached), and
+     immediately searches the freshly-requested item.
 
 6. **Bootstrap existing items** so dc-bridge learns about anything added before
    the webhooks existed:

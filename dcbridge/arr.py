@@ -397,6 +397,168 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
     }
 
 
+async def resync_one_series(cfg: Config, state: State, sid: str) -> bool:
+    """Immediate, single-series equivalent of _sync_sonarr's per-item work.
+
+    A fresh request must supersede the periodic (~15 min) sync, not wait for
+    it: _sync_sonarr only touches the whole catalog on its own schedule, so an
+    item whose cached monitored_keys predates a just-requested new season can
+    sit there stale until the next cycle happens to run. Called from the
+    react_to_* paths right before poll_item, this re-fetches just this one
+    series + its episodes straight from Sonarr and writes fresh
+    monitored_keys/air_anchor/next_air/episode_years, so the very next
+    poll_item call already sees current data instead of relying solely on
+    poll_item's own live-fallback (sonarr_monitored_missing_keys), which only
+    covers the fully-unaired-series case.
+
+    Returns True if the series ended up with something wanted/scheduled
+    (state written), False otherwise (not monitored, no path, fetch failed, or
+    genuinely nothing outstanding right now) — mirrors _sync_sonarr's own
+    don't-touch-existing-state-on-failure caution."""
+    if not cfg.sonarr.api_key or not sid.isdigit():
+        return False
+    url = cfg.sonarr.url.rstrip("/")
+    h = {"X-Api-Key": cfg.sonarr.api_key}
+    item_id = f"sonarr:{sid}"
+    async with http_session() as http:
+        r = await http.get(f"{url}/api/v3/series/{sid}", headers=h)
+        if r.status_code != 200:
+            log.warning("resync_one_series %s: GET series -> %s", sid, r.status_code)
+            return False
+        s = r.json()
+        if not s.get("monitored"):
+            return False
+        title = s.get("title") or "?"
+        routed = await route_children_series(url, h, http, cfg.children_routing, s)
+        if routed:
+            s["path"] = routed
+        arr_path = s.get("path") or ""
+        if arr_path and not folder_name_is_scene_safe(Path(arr_path).name):
+            fixed = await reconcile_series_ascii_path(cfg, item_id)
+            if fixed:
+                s["path"] = fixed
+                arr_path = fixed
+        if not arr_path:
+            log.warning("resync_one_series %s (%s): no path; skipping", sid, title)
+            return False
+        target_dir_fs = arr_to_fs(arr_path, cfg.path_translate)
+
+        rep = await http.get(f"{url}/api/v3/episode", params={"seriesId": sid}, headers=h)
+        if rep.status_code != 200:
+            log.warning(
+                "resync_one_series %s (%s): episode fetch -> %s", sid, title, rep.status_code,
+            )
+            return False
+
+        air_anchor: str | None = None
+        next_air: str | None = None
+        wanted_keys: list[str] = []
+        episode_years: dict[str, int] = {}
+        now_e = int(time.time())
+        offset = int(cfg.poller.air_offset_hours * 3600)
+        for ep in rep.json():
+            season = ep.get("seasonNumber")
+            epnum = ep.get("episodeNumber")
+            if season is None or epnum is None:
+                continue
+            ekey = f"S{int(season):02d}E{int(epnum):02d}"
+            air = ep.get("airDateUtc")
+            if air and air[:4].isdigit():
+                episode_years[ekey] = int(air[:4])
+            if ep.get("hasFile"):
+                await state.mark_completed(item_id, ekey, None, "(pre-existing)")
+                continue
+            if not ep.get("monitored") or int(season) == 0:
+                continue
+            if not air:
+                if air_anchor is None:
+                    air_anchor = _EPOCH_ISO
+                wanted_keys.append(ekey)
+                continue
+            eff_e = _iso_to_epoch(air) + offset
+            eff = _utc_iso(eff_e)
+            if eff_e > now_e:
+                if next_air is None or eff < next_air:
+                    next_air = eff
+            else:
+                if air_anchor is None or eff > air_anchor:
+                    air_anchor = eff
+                wanted_keys.append(ekey)
+
+        if not wanted_keys and next_air is None:
+            return False
+
+        profiles_by_id, profiles_by_name = await _fetch_quality_profiles(url, h, http)
+        named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "sonarr")
+
+        await state.add_item(
+            id_=item_id, kind="tv", title=title, target_dir_fs=target_dir_fs,
+            monitored_keys=None, year=s.get("year"),
+        )
+        await state.set_tv_air(item_id, air_anchor, next_air)
+        await state.set_monitored_keys(item_id, wanted_keys)
+        await state.set_episode_air_years(item_id, episode_years)
+        await state.set_alt_titles(item_id, _alt_titles(s))
+        await state.set_quality_priority(
+            item_id,
+            named_priority if named_priority is not None
+            else (profiles_by_id.get(s.get("qualityProfileId")) or []),
+        )
+    log.info(
+        "resync_one_series %s (%s): %d key(s) wanted (superseding periodic sync)",
+        sid, title, len(wanted_keys),
+    )
+    return True
+
+
+async def resync_one_movie(cfg: Config, state: State, mid: str) -> bool:
+    """Immediate, single-movie equivalent of _sync_radarr's per-item work — same
+    supersede-the-periodic-sync rationale as resync_one_series."""
+    if not cfg.radarr.api_key or not mid.isdigit():
+        return False
+    url = cfg.radarr.url.rstrip("/")
+    h = {"X-Api-Key": cfg.radarr.api_key}
+    item_id = f"radarr:{mid}"
+    async with http_session() as http:
+        r = await http.get(f"{url}/api/v3/movie/{mid}", headers=h)
+        if r.status_code != 200:
+            log.warning("resync_one_movie %s: GET movie -> %s", mid, r.status_code)
+            return False
+        m = r.json()
+        if not m.get("monitored"):
+            return False
+        title = m.get("title") or "?"
+        if m.get("hasFile"):
+            return False  # already delivered — nothing to supersede
+        routed = await route_children_movie(url, h, http, cfg.children_routing, m)
+        if routed:
+            m["rootFolderPath"] = routed
+        arr_root = m.get("rootFolderPath") or ""
+        if not arr_root:
+            fp = m.get("folderPath") or m.get("path") or ""
+            if fp:
+                arr_root = str(Path(fp).parent)
+        if not arr_root:
+            log.warning("resync_one_movie %s (%s): no root/folder path; skipping", mid, title)
+            return False
+        target_dir_fs = arr_to_fs(arr_root, cfg.path_translate)
+        profiles_by_id, profiles_by_name = await _fetch_quality_profiles(url, h, http)
+        named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "radarr")
+        await state.add_item(
+            id_=item_id, kind="movie", title=title, target_dir_fs=target_dir_fs,
+            monitored_keys=["movie"], year=m.get("year"),
+        )
+        await state.set_quality_priority(
+            item_id,
+            named_priority if named_priority is not None
+            else (profiles_by_id.get(m.get("qualityProfileId")) or []),
+        )
+        await state.set_release_date(item_id, _movie_release_date(m))
+        await state.set_alt_titles(item_id, _alt_titles(m))
+    log.info("resync_one_movie %s (%s): superseding periodic sync", mid, title)
+    return True
+
+
 async def _count_requested_episodes(
     base: str, h: dict, http: httpx.AsyncClient, tmdb_id, seasons: list,
 ) -> Optional[int]:
