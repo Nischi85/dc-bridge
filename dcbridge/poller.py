@@ -534,27 +534,76 @@ async def remove_completed_bundle(ad: AirDCPP, release_name: str) -> None:
 
 async def remove_finished_tv_bundles(
     ad: AirDCPP, state: State, cfg: Config, item: dict, bundles: list[dict]
-) -> None:
+) -> int:
     """Clear FINISHED episode bundles for this series from the queue (files stay on
     disk). Matches by series title so it tidies both bridge- and user-queued
     episodes. If anything finished, fire ONE targeted *arr rescan for the series
-    (debounced: only when something was actually removed, never per-episode)."""
+    (debounced: only when something was actually removed, never per-episode).
+
+    Before trusting AirDC++'s "completed" flag, cross-checks with the same
+    .rar-presence signal movie_completion already trusts (_release_complete) —
+    seen live: AirDC++ reported a multi-volume TV bundle "completed" (Outer
+    Banks S05E04) with every .rNN part present and correctly sized, but the
+    base .rar itself never arrived; it closed the bundle anyway once every
+    other file's sources were exhausted. A scene RAR set downloads .rar LAST,
+    so its absence despite "completed" means the grab is genuinely dead, not
+    actually done — mark_completed on that would have permanently stopped the
+    bridge from ever re-searching it, since nothing else would have caught
+    the on-disk gap (Sonarr's own hasFile stays false, but the bridge's own
+    completed-keys dedup doesn't look at that).
+
+    A falsely-"completed" bundle is treated like a stalled one: removed from
+    the queue, its release recorded as failed (so retry picks something else),
+    and dropped from the shared `bundles` snapshot so this sweep's
+    in_queue_keys doesn't still count it — same mutate-in-place contract as
+    remove_stalled_tv_bundles. Returns the count of such removals, added into
+    the same search_backlog forcing as remove_stalled_tv_bundles's `freed`.
+    """
     item_id, title = item["id"], item["title"]
+    target_dir_fs = item["target_dir_fs"]
     removed = False
+    suspect_ids: set = set()
     for b in bundles:
         name = b.get("name") or ""
         st = b.get("status") or {}
-        if st.get("completed") and episode_keys_from_name(name) \
-                and release_matches_title(name, title, anchored=True):
+        eks = episode_keys_from_name(name)
+        if not (st.get("completed") and eks and release_matches_title(name, title, anchored=True)):
+            continue
+
+        verified = True
+        try:
+            season = season_of_episode_key(eks[0]) or 0
+            smb_dir = _to_smb_dir(target_dir_fs, cfg.path_map) + f"Season.{season}\\" + name + "\\"
+            dir_items = await ad.list_dir(smb_dir)
+            if dir_items is not None:  # None = couldn't check (transient) — don't block on uncertainty
+                verified = _release_complete(dir_items)
+        except Exception:
+            log.debug("poll %s: completeness verify failed for %r (treating as verified)", item_id, name)
+
+        if not verified:
+            log.warning(
+                "poll %s: %r reported complete by AirDC++ but the expected .rar/video "
+                "file is missing on disk — treating as a dead grab, not marking done",
+                item_id, name,
+            )
             if await ad.remove_bundle(b["id"], remove_finished=False):
-                # Mark the episode done immediately so we don't re-grab it in the
-                # window before the next Sonarr sync sets hasFile=true.
-                for ek in episode_keys_from_name(name):
-                    await state.mark_completed(item_id, ek, None, name)
-                log.info("poll %s: removed finished episode bundle %r from queue", item_id, name)
-                removed = True
+                for ek in eks:
+                    await state.add_failed_release(item_id, ek, name)
+                suspect_ids.add(b["id"])
+            continue
+
+        if await ad.remove_bundle(b["id"], remove_finished=False):
+            # Mark the episode done immediately so we don't re-grab it in the
+            # window before the next Sonarr sync sets hasFile=true.
+            for ek in eks:
+                await state.mark_completed(item_id, ek, None, name)
+            log.info("poll %s: removed finished episode bundle %r from queue", item_id, name)
+            removed = True
+    if suspect_ids:
+        bundles[:] = [b for b in bundles if b.get("id") not in suspect_ids]
     if removed:
         await trigger_arr_rescan(cfg, item_id)
+    return len(suspect_ids)
 
 
 async def remove_stalled_tv_bundles(
@@ -1117,10 +1166,11 @@ async def _poll_item(
     if kind == "tv":
         wanted = set(item.get("monitored_keys") or [])
         tv_bundles = bundles
-        await remove_finished_tv_bundles(ad, state, cfg, item, tv_bundles)
+        suspect = await remove_finished_tv_bundles(ad, state, cfg, item, tv_bundles)
         # Clear dead-sourced (stalled) bundles BEFORE reading the queue, so their
         # episodes re-enter needed_keys and get retried with a different release.
         freed = await remove_stalled_tv_bundles(ad, state, cfg, item, tv_bundles, int(time.time()))
+        freed += suspect
         if freed:
             # Force this item due THIS sweep (the cadence gate below runs next):
             # a backed-off series must re-search the episodes we just freed now,
