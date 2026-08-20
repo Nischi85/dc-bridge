@@ -69,6 +69,7 @@ class State:
             ("requested_seasons",   "ALTER TABLE tracked_items ADD COLUMN requested_seasons TEXT"),
             ("alt_titles",          "ALTER TABLE tracked_items ADD COLUMN alt_titles TEXT"),
             ("episode_air_years",   "ALTER TABLE tracked_items ADD COLUMN episode_air_years TEXT"),
+            ("last_synced_at",      "ALTER TABLE tracked_items ADD COLUMN last_synced_at INTEGER"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -117,7 +118,7 @@ class State:
         "id, kind, title, target_dir_fs, monitored_keys, request_status,"
         " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
         " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
-        " requested_seasons, alt_titles, episode_air_years"
+        " requested_seasons, alt_titles, episode_air_years, last_synced_at"
     )
 
     @staticmethod
@@ -141,6 +142,7 @@ class State:
             "requested_seasons": json.loads(r[15]) if r[15] else None,
             "alt_titles": json.loads(r[16]) if r[16] else [],
             "episode_air_years": json.loads(r[17]) if r[17] else {},
+            "last_synced_at": r[18],
         }
 
     async def list_items(self) -> list[dict]:
@@ -190,6 +192,20 @@ class State:
         async with self._lock:
             self.conn.execute(
                 "UPDATE tracked_items SET last_searched_at = ? WHERE id = ?",
+                (ts, item_id),
+            )
+            self.conn.commit()
+
+    async def set_last_synced_at(self, item_id: str, ts: int) -> None:
+        """Stamp the moment this item's monitored_keys/air fields were last refreshed
+        by a full _sync_sonarr/_sync_radarr pass (or a resync_one_* call) — distinct
+        from last_searched_at, which tracks poll attempts, not sync freshness. Lets
+        /metrics flag an item whose tracking data has gone stale despite the periodic
+        sync otherwise succeeding (the class of bug behind a real incident: a series'
+        monitored_keys sat frozen for years while other series kept syncing fine)."""
+        async with self._lock:
+            self.conn.execute(
+                "UPDATE tracked_items SET last_synced_at = ? WHERE id = ?",
                 (ts, item_id),
             )
             self.conn.commit()
@@ -394,6 +410,44 @@ class State:
                 " WHERE id = ? AND episode_air_years IS NOT ?",
                 (v, item_id, v),
             )
+
+    async def grab_counts_since(self, since_ts: int) -> dict[str, int]:
+        """Completed keys queued at or after since_ts, grouped by kind (joins
+        completed -> tracked_items). Used by GET /metrics."""
+        async with self._lock:
+            cur = self.conn.execute(
+                "SELECT ti.kind, COUNT(*) FROM completed c"
+                " JOIN tracked_items ti ON ti.id = c.item_id"
+                " WHERE c.queued_at >= ?"
+                " GROUP BY ti.kind",
+                (since_ts,),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
+    async def stale_active_items(
+        self, stale_before_ts: int, active_statuses: Optional[set[str]]
+    ) -> list[dict]:
+        """Tracked items — restricted to active_statuses when given — whose
+        last_synced_at is missing or older than stale_before_ts. See
+        set_last_synced_at's docstring for why this exists: it's the direct
+        fix for a real incident where a series' tracking data sat frozen for a
+        long time while other periodic syncs kept succeeding fine."""
+        async with self._lock:
+            if active_statuses:
+                placeholders = ",".join("?" * len(active_statuses))
+                cur = self.conn.execute(
+                    f"SELECT id, title, last_synced_at FROM tracked_items"
+                    f" WHERE request_status IN ({placeholders})"
+                    f" AND (last_synced_at IS NULL OR last_synced_at < ?)",
+                    (*active_statuses, stale_before_ts),
+                )
+            else:
+                cur = self.conn.execute(
+                    "SELECT id, title, last_synced_at FROM tracked_items"
+                    " WHERE last_synced_at IS NULL OR last_synced_at < ?",
+                    (stale_before_ts,),
+                )
+            return [{"id": r[0], "title": r[1], "last_synced_at": r[2]} for r in cur.fetchall()]
 
     async def set_jellyseerr_media_id(self, item_id: str, media_id: Optional[int]) -> None:
         async with self._lock:

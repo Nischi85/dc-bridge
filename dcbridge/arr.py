@@ -296,6 +296,7 @@ async def _sync_sonarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
             named_priority if named_priority is not None
             else (profiles_by_id.get(s.get("qualityProfileId")) or []),
         )
+        await state.set_last_synced_at(item_id, int(time.time()))
     log.info(
         "sonarr sync: %d series tracked, %d skipped (%d dropped as fully delivered), %d episodes pre-marked completed",
         added,
@@ -381,6 +382,7 @@ async def _sync_radarr(cfg: Config, state: State, http: httpx.AsyncClient) -> di
         )
         await state.set_release_date(item_id, _movie_release_date(m))
         await state.set_alt_titles(item_id, _alt_titles(m))
+        await state.set_last_synced_at(item_id, int(time.time()))
         added += 1
     log.info(
         "radarr sync: %d movies tracked, %d skipped (%d dropped as already downloaded), %d pre-marked completed",
@@ -504,6 +506,7 @@ async def resync_one_series(cfg: Config, state: State, sid: str) -> bool:
             named_priority if named_priority is not None
             else (profiles_by_id.get(s.get("qualityProfileId")) or []),
         )
+        await state.set_last_synced_at(item_id, int(time.time()))
     log.info(
         "resync_one_series %s (%s): %d key(s) wanted (superseding periodic sync)",
         sid, title, len(wanted_keys),
@@ -555,6 +558,7 @@ async def resync_one_movie(cfg: Config, state: State, mid: str) -> bool:
         )
         await state.set_release_date(item_id, _movie_release_date(m))
         await state.set_alt_titles(item_id, _alt_titles(m))
+        await state.set_last_synced_at(item_id, int(time.time()))
     log.info("resync_one_movie %s (%s): superseding periodic sync", mid, title)
     return True
 

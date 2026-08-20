@@ -46,6 +46,9 @@ from dcbridge.poller import (
 from dcbridge.watcher import (
     fs_watch_loop,
 )
+from dcbridge.metrics import (
+    counters,
+)
 
 
 class SonarrWebhook(BaseModel):
@@ -124,6 +127,49 @@ def make_app(cfg: Config) -> FastAPI:
             it["target_dir_smb"] = _try_smb(it["target_dir_fs"], cfg.path_map)
             out.append(it)
         return {"items": out, "count": len(out)}
+
+    @app.get("/metrics")
+    async def metrics():
+        """Operational snapshot: in-process counters since this process started
+        (reset on restart, like a Prometheus counter) plus stats derived from
+        state.db (persist across restarts).
+
+        `stale_tracking` is the direct fix for a real incident: a series'
+        monitored_keys/air fields sat frozen for a long time while every other
+        series kept syncing fine, and nothing surfaced it until a Jellyseerr
+        request for it silently went nowhere. An item here means its
+        last_synced_at (stamped every _sync_sonarr/_sync_radarr/resync_one_*
+        pass — see state.set_last_synced_at) is missing or older than 2x the
+        auto-sync interval despite still being active — i.e. the periodic sync
+        has stopped actually refreshing it, not just that nothing's due yet.
+        """
+        state: State = app.state.state
+        now_ts = int(time.time())
+        active_statuses = (
+            set(cfg.jellyseerr.active_statuses)
+            if cfg.jellyseerr.url and cfg.jellyseerr.api_key
+            else None
+        )
+        items = await state.list_items()
+        active_count = sum(
+            1 for it in items
+            if active_statuses is None or it.get("request_status") in active_statuses
+        )
+        grabs_24h = await state.grab_counts_since(now_ts - 86400)
+        grabs_7d = await state.grab_counts_since(now_ts - 7 * 86400)
+        stale_threshold_ts = now_ts - max(2 * cfg.auto_sync.interval_seconds, 1800)
+        stale = await state.stale_active_items(stale_threshold_ts, active_statuses)
+        for s in stale:
+            s["stale_seconds"] = now_ts - (s["last_synced_at"] or 0) if s["last_synced_at"] else None
+        return {
+            "process": counters.as_dict(now_ts),
+            "tracked_items_total": len(items),
+            "active_items_total": active_count,
+            "grabs_last_24h": grabs_24h,
+            "grabs_last_7d": grabs_7d,
+            "stale_tracking_count": len(stale),
+            "stale_tracking": stale[:20],  # payload cap; count above has the true total
+        }
 
     @app.get("/airdcpp/probe")
     async def airdcpp_probe(q: str = "Example.Show.S01", wait: float = 8.0):

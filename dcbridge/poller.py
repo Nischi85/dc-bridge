@@ -14,6 +14,9 @@ SCHEDULE_FILE = "/config/schedule.txt"  # live snapshot, rewritten each sweep
 from dcbridge.config import (
     Config,
 )
+from dcbridge.metrics import (
+    counters,
+)
 from dcbridge.helpers import (
     _SEASON_OR_EP_RE,
     _YEAR_RE,
@@ -292,15 +295,18 @@ async def auto_sync_loop(app: FastAPI) -> None:
                     await _sync_sonarr(cfg, state, http)
                 except Exception:
                     log.exception("auto-sync: sonarr failed")
+                    counters.sync_errors += 1
                 try:
                     await _sync_radarr(cfg, state, http)
                 except Exception:
                     log.exception("auto-sync: radarr failed")
+                    counters.sync_errors += 1
                 if cfg.jellyseerr.url and cfg.jellyseerr.api_key:
                     try:
                         await _sync_jellyseerr(cfg, state, http)
                     except Exception:
                         log.exception("auto-sync: jellyseerr failed")
+                        counters.sync_errors += 1
             # Refresh the schedule snapshot now that statuses are freshly stamped,
             # so the file is current within seconds of a restart / sync — not only
             # on the next 15-min poller sweep.
@@ -455,6 +461,7 @@ async def poller_loop(app: FastAPI) -> None:
                     searched = await poll_item(cfg, state, ad, it, completion, bundles)
                 except Exception:
                     log.exception("poll_item failed for %s", it.get("id"))
+                    counters.poll_errors += 1
                 # Jitter only spreads real AirDC++ searches; skipped or backed-off
                 # items cost nothing, so due items are never held back.
                 if searched:
@@ -1341,6 +1348,7 @@ async def _poll_item(
 
     if queued:
         log.info("poll %s: queued %d new key(s) total", item_id, queued)
+        counters.items_queued += queued
         # If a queued release already exists on disk, AirDC++ instant-completes
         # it without leaving a bundle to catch — so nudge a targeted *arr rescan
         # so it imports them (hasFile=true) and they leave the wanted set,
@@ -1350,6 +1358,7 @@ async def _poll_item(
 
     # We issued an AirDC++ search round-trip for this item; the poller uses this
     # to spend its inter-search jitter only on real searches.
+    counters.searches_run += 1
     return True
 
 

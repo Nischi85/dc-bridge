@@ -214,11 +214,24 @@ doesn't change the repository field won't re-pull.
 | `POST /sync` | Re-learn items from Sonarr/Radarr/Jellyseerr (safe to re-run). |
 | `POST /poll/radarr:<id>` (or `sonarr:<id>`) | Search + queue one item now. |
 | `GET /state?only_active=true` | Show the active worklist. |
+| `GET /metrics` | Operational snapshot: process counters (searches/queues/errors since start) + state.db-derived stats (grabs last 24h/7d, active item count, and `stale_tracking` — any active item whose tracking data hasn't actually been refreshed by a sync pass in over 2x the auto-sync interval, even if periodic syncs are otherwise succeeding). Check this first for "why didn't X download." |
 | `GET /airdcpp/probe?q=<query>` | Dry-run a hub search (no download) to sanity-check results. |
 | webhooks: `POST /webhook/{sonarr,radarr}` | Where Sonarr/Radarr notify the bridge (series/movie add → immediate search). |
 | `POST /webhook/jellyseerr` | Where Jellyseerr notifies the bridge; approves + syncs + searches freshly-requested items now. |
 
 Logs: `docker logs -f dc-bridge` (and a rotating file if `logging.log_file` is set).
+
+### Tests
+
+```
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+Covers the pure matching/quality/scheduling logic in `helpers.py` (`tests/test_matching_guards.py`)
+and the `compute_cadence` scheduling state machine (`tests/test_cadence.py`) — the parts most
+prone to a silent wrong-grab or a silently-stuck item if a guard regresses. Not run as part of
+the Docker build (kept out of the runtime image); run manually or wire into CI.
 
 ## Disaster recovery
 
