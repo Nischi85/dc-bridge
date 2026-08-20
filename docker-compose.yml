@@ -18,6 +18,10 @@ services:
       # Read-only: real media storage, for fs_watch (out-of-band delete detection).
       # Must match config.yaml's fs_watch.watch_root exactly. Omit both if unused.
       - /mnt/zzd/share/fin:/mnt/zzd/share/fin:ro
+      # Read-only: rargate's status file, for alerting's stuck-release check.
+      # Must match config.yaml's alerting.rargate_status_file exactly. Omit both
+      # if unused (or not running rargate).
+      - /mnt/cache/rargate:/mnt/cache/rargate:ro
     environment:
       - CONFIG_PATH=/config/config.yaml
     restart: unless-stopped

@@ -1,0 +1,2 @@
+# Generated dc-bridge alert-notify schedule:
+*/10 * * * * /usr/bin/python3 /mnt/zzd/non-share.files/Device_install_and_configuration/unRAID/dc-bridge/deploy/alert-notify.py &> /dev/null

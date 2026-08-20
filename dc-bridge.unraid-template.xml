@@ -42,6 +42,11 @@
       <ContainerDir>/mnt/zzd/share/fin</ContainerDir>
       <Mode>ro</Mode>
     </Volume>
+    <Volume>
+      <HostDir>/mnt/cache/rargate</HostDir>
+      <ContainerDir>/mnt/cache/rargate</ContainerDir>
+      <Mode>ro</Mode>
+    </Volume>
   </Data>
   <Environment>
     <Variable>
@@ -55,5 +60,6 @@
   <Config Name="Config directory" Target="/config" Default="/mnt/cache/appdata/dc-bridge" Mode="rw" Description="Persistent config.yaml + state.db live here." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/dc-bridge</Config>
   <Config Name="Log directory" Target="/mnt/cache/dc-bridge" Default="/mnt/cache/dc-bridge" Mode="rw" Description="Where the bridge writes its rotating log file (logging.log_file in config.yaml points here)." Type="Path" Display="always" Required="false" Mask="false">/mnt/cache/dc-bridge</Config>
   <Config Name="Media storage (fs_watch, read-only)" Target="/mnt/zzd/share/fin" Default="/mnt/zzd/share/fin" Mode="ro" Description="Real media storage, mounted read-only so the bridge can detect out-of-band deletions (fs_watch in config.yaml). Must match fs_watch.watch_root exactly. Remove this mount if fs_watch.enabled is false." Type="Path" Display="always" Required="false" Mask="false">/mnt/zzd/share/fin</Config>
+  <Config Name="rargate status (alerting, read-only)" Target="/mnt/cache/rargate" Default="/mnt/cache/rargate" Mode="ro" Description="rargate's own appdata dir, mounted read-only so alerting can read rargate-status.json for the stuck-release check. Must match alerting.rargate_status_file exactly. Remove this mount if alerting.enabled is false or rargate_status_file is empty." Type="Path" Display="always" Required="false" Mask="false">/mnt/cache/rargate</Config>
   <Config Name="CONFIG_PATH" Target="CONFIG_PATH" Default="/config/config.yaml" Mode="" Description="Where the bridge reads its config inside the container." Type="Variable" Display="always" Required="true" Mask="false">/config/config.yaml</Config>
 </Container>

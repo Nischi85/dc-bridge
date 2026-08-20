@@ -147,6 +147,25 @@ fs_watch:
   # debounce_seconds: 5.0
   # reindex_interval_seconds: 900
 
+# Periodically check the bridge's own stale-tracking canary (see /metrics'
+# docstring) and, optionally, rargate's stuck-release count, writing the result
+# to alert_file for a host-side script to turn into a real notification —
+# closes the gap where that data exists but nothing actively tells you about
+# it. method="file" is the only implementation so far (a host-side script/cron
+# reads alert_file and calls unRAID's own notify — see the README and
+# deploy/alert-notify.py); it deliberately avoids bind-mounting unRAID's
+# notify-script host state (/boot/config, /tmp/notifications) into this
+# container. Set rargate_status_file to "" to skip that half of the check if
+# you're not running rargate (or want to bind-mount it read-only:
+#   -v /mnt/cache/rargate:/mnt/cache/rargate:ro
+# to match the path below).
+alerting:
+  enabled: false
+  method: file
+  check_interval_seconds: 600
+  alert_file: /mnt/cache/dc-bridge/pending_alerts.json
+  rargate_status_file: ""
+
 # Route children's content to dedicated *arr root folders by genre. A movie/series
 # carrying any listed genre is relocated (metadata move, moveFiles=false — files are
 # never touched) to the matching root, so its download and *arr management land

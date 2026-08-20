@@ -138,6 +138,33 @@ class FsWatchCfg(BaseModel):
     reindex_interval_seconds: int = 900
 
 
+class AlertingCfg(BaseModel):
+    """Periodically checks the bridge's own /metrics staleness canary plus
+    rargate's status file for stuck releases, and pushes a notification when
+    either goes non-zero — closing the gap where that data existed but nothing
+    surfaced it (the class of incident behind this feature: a series' tracking
+    sat frozen for a long time and nobody was told).
+
+    method picks how the alert actually gets delivered, kept as a named
+    dispatch so a new backend is a small addition, not a redesign:
+      - "file": write the current problem state to alert_file as JSON. Used
+        because unRAID's own notify script is a host-side PHP tool tied to
+        /boot/config and /tmp/notifications — too much host state to bind-mount
+        into a container — so a small host-side script/cron reads this file
+        and calls notify natively instead (see deploy/alert-notify.sh).
+        Dedup/cooldown is the READER's job (compare against what it last
+        notified); this side just truthfully reports current state every check.
+      - "webhook": not yet implemented — reserved for a future direct HTTP push
+        (ntfy/Discord/etc.), which wouldn't need the host-side script at all.
+    """
+    enabled: bool = False
+    method: str = "file"  # "file" | "webhook" (webhook not yet implemented)
+    check_interval_seconds: int = 600
+    alert_file: str = "/mnt/cache/dc-bridge/pending_alerts.json"
+    rargate_status_file: str = ""  # e.g. /mnt/cache/rargate/rargate-status.json; "" = skip that check
+    webhook_url: str = ""  # reserved for method="webhook"
+
+
 class LoggingCfg(BaseModel):
     """File logging, on top of stdout (docker logs). Empty log_file = stdout only.
     The file resets on each start and rotates by size."""
@@ -239,6 +266,7 @@ class Config(BaseModel):
     poller: PollerCfg = PollerCfg()
     auto_sync: AutoSyncCfg = AutoSyncCfg()
     fs_watch: FsWatchCfg = FsWatchCfg()
+    alerting: AlertingCfg = AlertingCfg()
     jellyseerr: JellyseerrCfg = JellyseerrCfg()
     children_routing: ChildrenRoutingCfg = ChildrenRoutingCfg()
     logging: LoggingCfg = LoggingCfg()

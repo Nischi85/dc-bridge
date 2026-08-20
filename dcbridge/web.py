@@ -49,6 +49,9 @@ from dcbridge.watcher import (
 from dcbridge.metrics import (
     counters,
 )
+from dcbridge.alerting import (
+    alert_loop,
+)
 
 
 class SonarrWebhook(BaseModel):
@@ -83,17 +86,22 @@ async def lifespan(app: FastAPI):
     fs_watch_task: Optional[asyncio.Task] = None
     if cfg.fs_watch.enabled:
         fs_watch_task = asyncio.create_task(fs_watch_loop(app))
+    alert_task: Optional[asyncio.Task] = None
+    if cfg.alerting.enabled:
+        alert_task = asyncio.create_task(alert_loop(app))
     log.info(
-        "dc-bridge ready: webhook on :%s, polling every %ss, auto-sync every %ss, fs-watch %s",
+        "dc-bridge ready: webhook on :%s, polling every %ss, auto-sync every %ss, "
+        "fs-watch %s, alerting %s",
         cfg.bridge.port,
         cfg.poller.interval_seconds,
         cfg.auto_sync.interval_seconds,
         "on" if cfg.fs_watch.enabled else "off",
+        "on" if cfg.alerting.enabled else "off",
     )
     try:
         yield
     finally:
-        for t in (poller_task, auto_sync_task, fs_watch_task):
+        for t in (poller_task, auto_sync_task, fs_watch_task, alert_task):
             if t is not None:
                 t.cancel()
                 try:

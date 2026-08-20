@@ -183,6 +183,37 @@ and `*.log` are gitignored).
    ```
    Not needed if *arr's library sits on storage it can delete from directly.
 
+8. **(Optional) Enable alerting** so `GET /metrics`' `stale_tracking` canary and
+   (if you run it) rargate's stuck-release count actually notify you instead
+   of sitting there until someone thinks to check. `method: file` writes the
+   current problem state to `alert_file`, and a small host-side script/cron —
+   `deploy/alert-notify.py` + `deploy/dc-bridge-alerts.cron` — reads it and
+   fires a real unRAID notification (via `/usr/local/emhttp/webGui/scripts/notify`,
+   whatever channels you already have configured in unRAID's own Settings →
+   Notifications). This deliberately runs on the HOST, not in the container —
+   that script needs `/boot/config` + `/tmp/notifications`, far more host
+   state than bind-mounting into the container is worth for this.
+
+   Install the cron fragment once (unRAID's own pattern — same mechanism as
+   e.g. the ZFS scrub schedule):
+   ```
+   cp deploy/dc-bridge-alerts.cron /boot/config/plugins/dynamix/
+   /usr/local/sbin/update_cron
+   ```
+   Bind-mount rargate's status file read-only if you want that half of the check:
+   ```
+   -v /mnt/cache/rargate:/mnt/cache/rargate:ro
+   ```
+   ```yaml
+   alerting:
+     enabled: true
+     method: file
+     alert_file: /mnt/cache/dc-bridge/pending_alerts.json
+     rargate_status_file: /mnt/cache/rargate/rargate-status.json  # "" to skip
+   ```
+   `method: webhook` (direct ntfy/Discord push, no host script needed) isn't
+   implemented yet — the config field is reserved for it.
+
 ## unRAID GUI template
 
 Copy `dc-bridge.unraid-template.xml` into
