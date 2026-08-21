@@ -792,6 +792,34 @@ async def _sync_jellyseerr(cfg: Config, state: State, http: httpx.AsyncClient) -
     }
 
 
+async def sonarr_imported_episode_keys(cfg: Config, item_id: str) -> Optional[set[str]]:
+    """SxxExx keys Sonarr currently holds a file for, in one series — one API
+    call, shared by arr_has_imported's TV branch and the per-episode import
+    reconciliation in poller.py's verify_tv_imports. None on any error
+    (unreachable, non-200, series id missing) — never treated as 'nothing
+    imported', so callers never act on uncertainty."""
+    prefix, _, sid = item_id.partition(":")
+    if prefix != "sonarr" or not sid.isdigit() or not cfg.sonarr.api_key:
+        return None
+    base = cfg.sonarr.url.rstrip("/")
+    try:
+        async with http_session() as http:
+            r = await http.get(
+                f"{base}/api/v3/episode",
+                params={"seriesId": sid, "includeEpisodeFile": "true"},
+                headers={"X-Api-Key": cfg.sonarr.api_key},
+            )
+        if r.status_code != 200:
+            return None
+        return {
+            f"S{int(e.get('seasonNumber', 0)):02d}E{int(e.get('episodeNumber', 0)):02d}"
+            for e in r.json() if e.get("hasFile")
+        }
+    except Exception as e:
+        log.warning("sonarr_imported_episode_keys %s failed: %s", item_id, e)
+        return None
+
+
 async def arr_has_imported(
     cfg: Config, item: dict, completed_keys: Optional[set[str]] = None
 ) -> Optional[bool]:
@@ -820,21 +848,11 @@ async def arr_has_imported(
                 return None
             return bool(r.json().get("hasFile"))
         if prefix == "sonarr":
-            if not cfg.sonarr.api_key or not completed_keys:
+            if not completed_keys:
                 return None
-            base = cfg.sonarr.url.rstrip("/")
-            async with http_session() as http:
-                r = await http.get(
-                    f"{base}/api/v3/episode",
-                    params={"seriesId": sid, "includeEpisodeFile": "true"},
-                    headers={"X-Api-Key": cfg.sonarr.api_key},
-                )
-            if r.status_code != 200:
+            have = await sonarr_imported_episode_keys(cfg, item["id"])
+            if have is None:
                 return None
-            have = {
-                f"S{int(e.get('seasonNumber', 0)):02d}E{int(e.get('episodeNumber', 0)):02d}"
-                for e in r.json() if e.get("hasFile")
-            }
             return completed_keys.issubset(have)  # imported iff every grabbed ep has a file
     except Exception as e:
         log.warning("arr_has_imported %s failed: %s", item["id"], e)

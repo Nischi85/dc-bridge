@@ -72,6 +72,7 @@ from dcbridge.arr import (
     reconcile_series_ascii_path,
     resync_one_movie,
     resync_one_series,
+    sonarr_imported_episode_keys,
     sonarr_monitored_missing_keys,
     trigger_arr_rescan,
 )
@@ -652,6 +653,72 @@ async def remove_stalled_tv_bundles(
     return len(dropped)
 
 
+async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) -> None:
+    """Confirms Sonarr actually imported every episode this item's bridge grabs
+    completed — remove_finished_tv_bundles firing trigger_arr_rescan proves a
+    rescan was *requested*, not that it *succeeded*. Seen live: AirDC++ finished
+    a grab, dc-bridge marked it complete and fired the one-shot rescan, but
+    Sonarr's own file-matcher silently failed to import that specific file
+    (every sibling episode with the identical naming pattern parsed and
+    imported fine; this one alone came back "quality: Unknown, no episode
+    match") — the episode just sat missing forever with no further retry,
+    since remove_finished_tv_bundles only rescans once, at the moment the
+    bundle disappears from AirDC++'s queue.
+
+    Mirrors arr.py's movie-side import_verified marker (same `completed`
+    table, so no schema change) but per episode key — a "<key>:verified"
+    marker never collides with a real SxxExx key, and a show can have some
+    episodes verified while others are still pending. Once verified, a key
+    costs one query-less early-return on every later sweep.
+
+    Kept cheap on purpose: bails immediately (no Sonarr call) for the
+    overwhelming common case of nothing pending, and only re-triggers a
+    rescan for keys that have been stuck past a grace period — never every
+    sweep — so a real recurrence costs one Sonarr episode-list call and one
+    rescan command, not a filesystem scan or an AirDC++ call.
+    """
+    item_id = item["id"]
+    markers = await state.get_completed_keys(item_id)  # [(key, release_name, queued_at), ...]
+    pending = [
+        (k, qat) for k, rel, qat in markers
+        if rel and rel != "(pre-existing)" and ":" not in k
+    ]
+    if not pending:
+        return
+    unverified = [
+        (k, qat) for k, qat in pending
+        if not await state.is_completed(item_id, f"{k}:verified")
+    ]
+    if not unverified:
+        return
+
+    grace = max(cfg.poller.interval_seconds * 2, 1800)
+    due = [(k, qat) for k, qat in unverified if now_ts - int(qat or 0) >= grace]
+    if not due:
+        return  # still within the grace window; give the one-shot rescan time to land
+
+    have = await sonarr_imported_episode_keys(cfg, item_id)
+    if have is None:
+        return  # Sonarr unreachable; retry next sweep rather than act on uncertainty
+
+    newly_verified = still_missing = 0
+    for key, _qat in due:
+        if key in have:
+            await state.mark_completed(item_id, f"{key}:verified", None, "(verified)")
+            newly_verified += 1
+        else:
+            still_missing += 1
+    if newly_verified:
+        log.info("poll %s: confirmed %d episode(s) actually imported by Sonarr", item_id, newly_verified)
+    if still_missing:
+        log.warning(
+            "poll %s: %d episode(s) completed by the bridge %.0fmin+ ago still not "
+            "imported by Sonarr — retrying targeted rescan",
+            item_id, still_missing, grace / 60,
+        )
+        await trigger_arr_rescan(cfg, item_id)
+
+
 def _select_candidates(
     results: list[dict], kind: str, title: str, item: dict, cfg: Config,
     item_priority: list[str], needed_keys: set[str], item_id: str,
@@ -1177,6 +1244,7 @@ async def _poll_item(
             # not wait out its back-off tier. Persist so it keeps draining.
             item["search_backlog"] = max(int(item.get("search_backlog") or 0), freed)
             await state.set_search_backlog(item_id, item["search_backlog"])
+        await verify_tv_imports(cfg, state, item, int(time.time()))
         in_queue_keys = _series_keys_in_queue(tv_bundles, title)
         # Still needed = wanted, minus what's already in the queue, minus what we
         # already have (completed markers / Sonarr hasFile). This is what we search
