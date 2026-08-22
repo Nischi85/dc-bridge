@@ -50,6 +50,7 @@ from dcbridge.util import (
     _parent_dir_and_name,
     _release_complete,
     _series_keys_in_queue,
+    _sfv_verified_complete,
     _to_smb_dir,
     arr_to_fs,
     http_session,
@@ -487,15 +488,25 @@ async def movie_completion(
     can't translate are trusted as complete — they aren't bridge downloads."""
     if not release_name or release_name == "(pre-existing)":
         return "complete"
-    try:
-        smb = _to_smb_dir(item["target_dir_fs"], cfg.path_map) + release_name + "\\"
-    except Exception:
-        return "complete"
-    items = await ad.list_dir(smb)
-    if items is None:
-        return "complete"  # AirDC++ error — don't disrupt on a transient failure
-    if items and _release_complete(items):
-        return "complete"
+    # Prefer the SFV manifest cross-check (reads the real backing storage
+    # directly) over the weaker last-file-presence heuristic below — it
+    # catches a release AirDC++ reports "completed" despite most of its RAR
+    # volumes actually missing, which _release_complete alone cannot (see
+    # _sfv_verified_complete's docstring for the live incident that found this).
+    sfv_verdict = _sfv_verified_complete(Path(item["target_dir_fs"]) / release_name)
+    if sfv_verdict is not None:
+        if sfv_verdict:
+            return "complete"
+    else:
+        try:
+            smb = _to_smb_dir(item["target_dir_fs"], cfg.path_map) + release_name + "\\"
+        except Exception:
+            return "complete"
+        items = await ad.list_dir(smb)
+        if items is None:
+            return "complete"  # AirDC++ error — don't disrupt on a transient failure
+        if items and _release_complete(items):
+            return "complete"
     grace = int(cfg.poller.download_grace_hours * 3600)
     if now_ts - int(queued_at or 0) < grace:
         return "downloading"
@@ -541,16 +552,21 @@ async def remove_finished_tv_bundles(
     episodes. If anything finished, fire ONE targeted *arr rescan for the series
     (debounced: only when something was actually removed, never per-episode).
 
-    Before trusting AirDC++'s "completed" flag, cross-checks with the same
-    .rar-presence signal movie_completion already trusts (_release_complete) —
-    seen live: AirDC++ reported a multi-volume TV bundle "completed" (Outer
-    Banks S05E04) with every .rNN part present and correctly sized, but the
-    base .rar itself never arrived; it closed the bundle anyway once every
-    other file's sources were exhausted. A scene RAR set downloads .rar LAST,
-    so its absence despite "completed" means the grab is genuinely dead, not
-    actually done — mark_completed on that would have permanently stopped the
-    bridge from ever re-searching it, since nothing else would have caught
-    the on-disk gap (Sonarr's own hasFile stays false, but the bridge's own
+    Before trusting AirDC++'s "completed" flag, cross-checks against the real
+    backing storage — preferably the release's own .sfv manifest
+    (_sfv_verified_complete, every listed volume must actually be present),
+    falling back to movie_completion's weaker last-file-presence heuristic
+    (_release_complete) when no readable .sfv is found. Two distinct live
+    incidents motivated this, both "AirDC++ says completed, files disagree":
+    Outer Banks S05E04 was missing its LAST .rNN part while claiming
+    complete (caught by the .rar-presence check alone); Underworld: Evolution
+    (a movie, same root cause, see _sfv_verified_complete's docstring) had
+    only 2 of 87 expected volumes on disk yet still passed a last-file-only
+    check because one of the two present was the last volume — the manifest
+    cross-check is what actually catches that case. Either way, marking a
+    falsely-"completed" episode done would permanently stop the bridge from
+    ever re-searching it, since nothing else would have caught the on-disk
+    gap (Sonarr's own hasFile stays false, but the bridge's own
     completed-keys dedup doesn't look at that).
 
     A falsely-"completed" bundle is treated like a stalled one: removed from
@@ -574,10 +590,14 @@ async def remove_finished_tv_bundles(
         verified = True
         try:
             season = season_of_episode_key(eks[0]) or 0
-            smb_dir = _to_smb_dir(target_dir_fs, cfg.path_map) + f"Season.{season}\\" + name + "\\"
-            dir_items = await ad.list_dir(smb_dir)
-            if dir_items is not None:  # None = couldn't check (transient) — don't block on uncertainty
-                verified = _release_complete(dir_items)
+            sfv_verdict = _sfv_verified_complete(Path(target_dir_fs) / f"Season.{season}" / name)
+            if sfv_verdict is not None:
+                verified = sfv_verdict
+            else:
+                smb_dir = _to_smb_dir(target_dir_fs, cfg.path_map) + f"Season.{season}\\" + name + "\\"
+                dir_items = await ad.list_dir(smb_dir)
+                if dir_items is not None:  # None = couldn't check (transient) — don't block on uncertainty
+                    verified = _release_complete(dir_items)
         except Exception:
             log.debug("poll %s: completeness verify failed for %r (treating as verified)", item_id, name)
 

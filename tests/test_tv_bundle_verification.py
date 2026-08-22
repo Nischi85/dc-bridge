@@ -101,3 +101,50 @@ def test_unverifiable_dir_listing_falls_back_to_trusting_the_completed_flag():
     assert suspect_count == 0
     assert state.failed == []
     assert len(state.completed) == 1
+
+
+def test_sfv_manifest_takes_precedence_and_catches_a_last_volume_only_grab(tmp_path):
+    # A stricter case than the pure last-file heuristic can catch: the
+    # release folder genuinely only has 2 of the manifest's volumes, but one
+    # of them IS the last (.rar) — _release_complete alone would call this
+    # done. The SFV cross-check must not, since it reads the real backing
+    # storage directly rather than trusting AirDC++'s dir listing at all.
+    name = "Outer.Banks.S05E04.1080p.WEB.H264-CAKES"
+    release_dir = tmp_path / "Season.5" / name
+    release_dir.mkdir(parents=True)
+    all_volumes = [f"{name.lower()}.r{i:02d}" for i in range(10)] + [f"{name.lower()}.rar"]
+    sfv = release_dir / f"{name.lower()}.sfv"
+    sfv.write_text("".join(f"{v} DEADBEEF\n" for v in all_volumes), encoding="utf-8")
+    (release_dir / f"{name.lower()}.r00").write_bytes(b"x")
+    (release_dir / f"{name.lower()}.rar").write_bytes(b"x")  # last volume present...
+
+    item = {"id": "sonarr:663", "title": "Outer Banks", "target_dir_fs": str(tmp_path)}
+    # AirDC++'s own view would wrongly call it done (only checks for .rar) —
+    # confirms the SFV check is what's actually catching this, not the fallback.
+    ad = FakeAirDCPP([{"name": f"{name.lower()}.rar", "type": {"id": "file"}}])
+    state = FakeState()
+    suspect_count = asyncio.run(
+        remove_finished_tv_bundles(ad, state, _cfg(), item, [_bundle(name)])
+    )
+    assert suspect_count == 1
+    assert state.completed == []
+
+
+def test_sfv_manifest_verifies_a_genuinely_complete_release(tmp_path):
+    name = "Outer.Banks.S05E04.1080p.WEB.H264-CAKES"
+    release_dir = tmp_path / "Season.5" / name
+    release_dir.mkdir(parents=True)
+    all_volumes = [f"{name.lower()}.r{i:02d}" for i in range(3)] + [f"{name.lower()}.rar"]
+    sfv = release_dir / f"{name.lower()}.sfv"
+    sfv.write_text("".join(f"{v} DEADBEEF\n" for v in all_volumes), encoding="utf-8")
+    for v in all_volumes:
+        (release_dir / v).write_bytes(b"x")
+
+    item = {"id": "sonarr:663", "title": "Outer Banks", "target_dir_fs": str(tmp_path)}
+    ad = FakeAirDCPP(None)  # never consulted — the SFV check wins outright
+    state = FakeState()
+    suspect_count = asyncio.run(
+        remove_finished_tv_bundles(ad, state, _cfg(), item, [_bundle(name)])
+    )
+    assert suspect_count == 0
+    assert len(state.completed) == 1

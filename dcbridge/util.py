@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 import httpx
 log = logging.getLogger("dc_bridge")
@@ -122,6 +123,51 @@ def _release_complete(items: list[dict]) -> bool:
         if name.endswith(".rar") or name.endswith(_VIDEO_EXT):
             return True
     return False
+
+
+def _sfv_verified_complete(dir_fs: Path) -> Optional[bool]:
+    """Cross-checks a release folder's .sfv manifest against what's actually on
+    disk — every filename the manifest lists must be present. Returns True
+    (verified complete), False (manifest present but something's missing — a
+    real incomplete/corrupt grab even if the LAST volume happens to exist,
+    which is all _release_complete alone checks for), or None (no readable
+    .sfv here; caller should fall back to _release_complete's weaker
+    last-file-presence heuristic).
+
+    _release_complete alone was fooled live (Underworld: Evolution, 2026-08-
+    22): AirDC++ reported the grab "completed" with 2 of 87 expected RAR
+    volumes actually on disk — but one of the two was the LAST volume
+    (.rar), the only thing _release_complete looks for. Reads directly off
+    dc-bridge's own read-only bind mount of the real backing storage (the
+    same physical files AirDC++/rargate write to), not via AirDC++'s webapi
+    — dc-bridge already has this access, so no new "read remote file
+    content" capability is needed there."""
+    try:
+        entries = list(dir_fs.iterdir())
+    except OSError:
+        return None
+    sfv_files = [p for p in entries if p.suffix.lower() == ".sfv"]
+    if not sfv_files:
+        return None
+    present = {p.name.lower() for p in entries if p.is_file()}
+    expected: set[str] = set()
+    try:
+        with open(sfv_files[0], "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith(";"):
+                    continue
+                # "filename.ext CRC32HEX" — filename may contain spaces, the
+                # CRC is always the last whitespace-separated token.
+                parts = line.rsplit(None, 1)
+                if len(parts) != 2:
+                    continue
+                expected.add(parts[0].strip().lower())
+    except OSError:
+        return None
+    if not expected:
+        return None
+    return expected.issubset(present)
 
 
 def _series_keys_in_queue(bundles: list[dict], title: str) -> set[str]:
