@@ -12,6 +12,7 @@ from dcbridge.helpers import (
     configure_filters,
     has_unwanted_subs,
     is_adult_release,
+    is_disc_source_release,
     is_foreign_language,
     movie_title_prefix_ok,
     passes_quality,
@@ -195,6 +196,37 @@ def test_adult_release_rejected_for_normal_request():
 
 def test_adult_tag_exempt_when_own_title_carries_it():
     assert not is_adult_release("xXx.2002.1080p.BluRay", "xXx")
+
+
+# ── disc-source (DVDR) rejection ─────────────────────────────────────────────
+
+
+def test_dvdr_release_is_rejected():
+    # Real case: extracted to a single unplayable .img file, Emby couldn't play it.
+    assert is_disc_source_release("Underworld.Rise.Of.The.Lycans.MULTISUBS.PAL.DVDR-CONDITION")
+
+
+def test_dvd_dash_r_variant_is_rejected():
+    assert is_disc_source_release("Some.Movie.2020.DVD-R-GROUP")
+
+
+def test_sized_dvdr_variant_is_rejected():
+    assert is_disc_source_release("Some.Movie.2020.DVDR9-GROUP")
+
+
+def test_dvd9_source_tag_without_r_is_not_rejected():
+    # Real case: a normal, playable x264 re-encode that merely notes DVD9
+    # SOURCE material — not an untouched disc dump. Must not be confused
+    # with DVDR just because both start with "DVD9"/"DVD".
+    assert not is_disc_source_release("Underworld.Evolution.2006.DVD9.1080p.BluRay.x264-hV")
+
+
+def test_plain_dvdrip_is_not_rejected():
+    assert not is_disc_source_release("Some.Movie.2020.DVDRip.XviD-GROUP")
+
+
+def test_normal_web_release_is_not_rejected():
+    assert not is_disc_source_release("Some.Movie.2020.1080p.WEB-DL.x264-GROUP")
 
 
 # ── quality gating + scoring ──────────────────────────────────────────────────

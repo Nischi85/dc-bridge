@@ -283,6 +283,30 @@ def is_sd_release(name: str) -> bool:
     return bool(_SD_SOURCE_RE.search(name))
 
 
+# DVDR/DVD-R (optionally sized, DVDR5/DVDR9) is a scene tag for an UNTOUCHED
+# disc dump — a raw .img/.iso, or a VIDEO_TS folder with no single playable
+# video file — as opposed to a re-encode that merely notes DVD9/DVD5 SOURCE
+# material (e.g. "...DVD9.1080p.BluRay.x264-GROUP" is a normal, playable x264
+# encode). Only the bare DVDR/DVD-R tag itself means "untouched disc dump",
+# so DVD9/DVD5 (no R) are deliberately NOT matched here — requiring the R
+# keeps this from misfiring on perfectly playable encodes.
+_DISC_SOURCE_RE = re.compile(r"\bDVD-?R\d*\b", re.IGNORECASE)
+
+
+def is_disc_source_release(name: str) -> bool:
+    """True for a release delivering a full disc image/structure instead of
+    playable video — Emby can't play these directly. Seen live: Underworld:
+    Rise of the Lycans grabbed as 'Underworld.Rise.Of.The.Lycans.MULTISUBS.
+    PAL.DVDR-CONDITION', which extracted to a single unplayable .img file.
+    has_rejected_extension (filters.reject_extensions, e.g. .img/.iso) is
+    the other half of this guard, but it can only see files a hub actually
+    listed individually — a release reported as an opaque whole-folder
+    result (the common/preferred case, so AirDC++ pulls it intact) has no
+    files to check there at all. This name-based check catches that blind
+    spot outright, before anything downloads."""
+    return bool(_DISC_SOURCE_RE.search(name))
+
+
 # Two denylists, both driven by the `filters` block in config.yaml: foreign-DUB
 # scene tags, and subtitle-language stems for English-audio releases muxed with
 # unwanted subs. The defaults below reproduce the historical hardcoded sets and

@@ -27,6 +27,7 @@ from dcbridge.helpers import (
     has_rejected_extension,
     has_unwanted_subs,
     is_adult_release,
+    is_disc_source_release,
     is_foreign_language,
     is_sd_release,
     loosen_hyphens_for_search,
@@ -802,9 +803,18 @@ def _select_candidates(
             continue
         if not passes_quality(release_name, total_size, kind, cfg.quality, item_priority):
             continue
+        # Disc-source reject: DVDR/DVD-R means an untouched disc dump (a raw
+        # .img/.iso, or VIDEO_TS with no single playable file) — reject by
+        # name outright, since a release reported as an opaque whole-folder
+        # hub result (the common case) has no individually-listed files for
+        # the extension check below to catch at all.
+        if is_disc_source_release(release_name):
+            log.debug("poll %s: skip %r — disc source (DVDR)", item_id, release_name)
+            continue
         # Disc-image reject: a DVDR release shipped as a single .img/.iso file
         # isn't playable in Emby without mounting/extraction, unlike a
         # VIDEO_TS-structured DVDR release (no .img/.iso files, so unaffected).
+        # Only reachable when the hub DID list individual files (see above).
         if has_rejected_extension(g["files"], cfg.filters.reject_extensions):
             log.debug("poll %s: skip %r — disc image file (.img/.iso)", item_id, release_name)
             continue
