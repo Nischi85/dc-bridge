@@ -33,6 +33,7 @@ from dcbridge.arr import (
     _sync_radarr,
     _sync_sonarr,
     auto_approve_requests,
+    retry_failed_jellyseerr_requests,
 )
 from dcbridge.poller import (
     auto_sync_loop,
@@ -62,6 +63,14 @@ class SonarrWebhook(BaseModel):
 class RadarrWebhook(BaseModel):
     eventType: str
     movie: Optional[dict] = None
+
+
+async def _handle_jellyseerr_failed(cfg: Config) -> None:
+    try:
+        async with http_session() as http:
+            await retry_failed_jellyseerr_requests(cfg, http)
+    except Exception:
+        log.exception("retry_failed_jellyseerr_requests failed")
 
 
 # ── App + lifecycle ──────────────────────────────────────────────────────────
@@ -337,6 +346,13 @@ def make_app(cfg: Config) -> FastAPI:
         log.info("jellyseerr webhook: %s %s", ntype, _truncate(json.dumps(body), 400))
         if ntype in {"", "TEST_NOTIFICATION"}:
             return {"ok": True, "test": ntype == "TEST_NOTIFICATION"}
+        if ntype == "MEDIA_FAILED":
+            # A collection-request race (see retry_failed_jellyseerr_requests'
+            # docstring) needs Jellyseerr's own request list, not this
+            # payload's fields — a plain retry-sweep, not react_to_jellyseerr's
+            # generic re-sync (which only helps items whose request_status
+            # actually got set, and a FAILED request's never does).
+            spawn_task(_handle_jellyseerr_failed(app.state.cfg))
         spawn_task(react_to_jellyseerr(app))
         return {"ok": True}
 

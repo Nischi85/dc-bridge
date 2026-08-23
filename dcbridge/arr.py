@@ -910,6 +910,100 @@ async def mark_jellyseerr_available(cfg: Config, item_id: str, media_id: Optiona
     return False
 
 
+async def retry_failed_jellyseerr_requests(cfg: Config, http: httpx.AsyncClient) -> dict:
+    """Jellyseerr's "request whole collection" feature fires several
+    near-simultaneous adds for different movies/series; Radarr/Sonarr's own
+    add endpoint isn't safe under that concurrency and can 409 on a genuine
+    database race — this is NOT a real failure, the media was actually added
+    by whichever request won the race (Radarr's own error message says so
+    outright: "This might happen if the movie already exists, in which case
+    you can safely ignore this error"). Jellyseerr has no way to know that on
+    its own and just marks its side of the losing request FAILED forever.
+
+    Seen live (2026-08-22): 3 of 5 Underworld movies requested as a
+    collection came back FAILED this way despite all 5 actually landing in
+    Radarr — found only by the next day's jellyseerr_pipeline_audit user
+    script (a separate, pre-existing daily check), fixed by hand via
+    Jellyseerr's own /retry endpoint. This closes that gap automatically:
+    retries ONLY requests where the underlying movie/series already exists
+    in Radarr/Sonarr (the exact signature of this race) — a genuine failure
+    (bad root folder, real connectivity issue, etc.) has no matching *arr
+    entry and is deliberately left alone rather than retried forever, so the
+    daily audit still catches real problems."""
+    js = cfg.jellyseerr
+    if not (js.url and js.api_key):
+        return {"skipped": "disabled"}
+    base = js.url.rstrip("/")
+    h = {"X-Api-Key": js.api_key}
+    retried = 0
+    left_failed = 0
+    skip = 0
+    while True:
+        try:
+            r = await http.get(
+                f"{base}/api/v1/request",
+                params={"filter": "failed", "take": 100, "skip": skip},
+                headers=h,
+            )
+        except Exception as e:
+            log.warning("retry-failed: list failed requests failed: %s", e)
+            break
+        if r.status_code != 200:
+            log.warning("retry-failed: list failed requests -> %s", r.status_code)
+            break
+        body = r.json()
+        results = body.get("results", []) if isinstance(body, dict) else []
+        if not results:
+            break
+        for req in results:
+            req_id = req.get("id")
+            media = req.get("media") or {}
+            mtype = media.get("mediaType") or req.get("type")
+            exists = False
+            try:
+                if mtype == "movie" and cfg.radarr.api_key and media.get("tmdbId"):
+                    rr = await http.get(
+                        f"{cfg.radarr.url.rstrip('/')}/api/v3/movie",
+                        params={"tmdbId": media["tmdbId"]},
+                        headers={"X-Api-Key": cfg.radarr.api_key},
+                    )
+                    exists = rr.status_code == 200 and bool(rr.json())
+                elif mtype == "tv" and cfg.sonarr.api_key and media.get("tvdbId"):
+                    sr = await http.get(
+                        f"{cfg.sonarr.url.rstrip('/')}/api/v3/series",
+                        params={"tvdbId": media["tvdbId"]},
+                        headers={"X-Api-Key": cfg.sonarr.api_key},
+                    )
+                    exists = sr.status_code == 200 and bool(sr.json())
+            except Exception as e:
+                log.debug("retry-failed: existence check for request %s failed: %s", req_id, e)
+            if not exists:
+                left_failed += 1
+                continue
+            try:
+                rr = await http.post(f"{base}/api/v1/request/{req_id}/retry", headers=h)
+                if rr.status_code == 200:
+                    retried += 1
+                    log.info(
+                        "retry-failed: retried request %s (%s already in *arr — was a false FAILED)",
+                        req_id, mtype,
+                    )
+                else:
+                    log.warning("retry-failed: retry %s -> %s", req_id, rr.status_code)
+                    left_failed += 1
+            except Exception as e:
+                log.warning("retry-failed: retry %s failed: %s", req_id, e)
+                left_failed += 1
+        page_info = body.get("pageInfo") or {}
+        total = int(page_info.get("results") or 0)
+        skip += 100
+        if skip >= total:
+            break
+    if retried or left_failed:
+        log.info("retry-failed: retried=%d left_failed=%d", retried, left_failed)
+    return {"retried": retried, "left_failed": left_failed}
+
+
 async def trigger_arr_rescan(cfg: Config, item_id: str) -> None:
     """Targeted rescan of ONE series/movie folder (RescanSeries/RescanMovie by id
     — NOT a whole-library scan) so *arr imports the freshly-downloaded files and
