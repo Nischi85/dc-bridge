@@ -16,6 +16,16 @@ class AirDCPPCfg(BaseModel):
     username: str
     password: str
     hub_urls: list[str] = Field(default_factory=list)
+    # Minimum gap enforced between any two hub_search dispatches, across ALL
+    # tracked items — not just within one item's own title-variant/episode
+    # pacing (see PollerCfg.tv_search_gap_seconds). Concurrent poll_item runs
+    # for different movies/series each fire their own hub_search calls with no
+    # shared spacing; a hub's own flood protection can then silently drop
+    # whichever one lands too soon after another, producing a false "0
+    # results" (root-caused 2026-08-26 via a real Interstellar request: 0
+    # results automated, hundreds found seconds later on a manual search /
+    # forced re-poll once nothing else was contending for the hub).
+    min_search_interval_seconds: float = 15.0
 
 
 class ArrCfg(BaseModel):

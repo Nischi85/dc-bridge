@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 import httpx
 from dcbridge.config import AirDCPPCfg
@@ -28,6 +29,12 @@ class AirDCPP:
         self._token: Optional[str] = None
         self._session_id: Optional[int] = None
         self._lock = asyncio.Lock()
+        # Serializes hub_search dispatch across ALL callers/items (see
+        # AirDCPPCfg.min_search_interval_seconds) so concurrent poll_item runs
+        # for different movies/series can't land two searches on a hub close
+        # enough together for its flood protection to silently drop one.
+        self._search_gate = asyncio.Lock()
+        self._last_search_dispatch: float = 0.0
 
     async def close(self) -> None:
         # Delete our server-side session before closing: AirDC++ caps sessions per
@@ -130,14 +137,22 @@ class AirDCPP:
         pattern: str,
         extensions: Optional[list[str]] = None,
     ) -> bool:
-        body: dict[str, Any] = {"query": {"pattern": pattern}}
-        if extensions:
-            body["query"]["extensions"] = list(extensions)
-        if self.cfg.hub_urls:
-            body["hub_urls"] = self.cfg.hub_urls
-        r = await self._retry_on_401(
-            "POST", f"/api/v1/search/{instance_id}/hub_search", json=body
-        )
+        # Held for the whole dispatch (not just the wait) so a second caller
+        # queued behind this one always measures its gap from when THIS
+        # search actually went out, not from when it merely started waiting.
+        async with self._search_gate:
+            wait = self.cfg.min_search_interval_seconds - (time.monotonic() - self._last_search_dispatch)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_search_dispatch = time.monotonic()
+            body: dict[str, Any] = {"query": {"pattern": pattern}}
+            if extensions:
+                body["query"]["extensions"] = list(extensions)
+            if self.cfg.hub_urls:
+                body["hub_urls"] = self.cfg.hub_urls
+            r = await self._retry_on_401(
+                "POST", f"/api/v1/search/{instance_id}/hub_search", json=body
+            )
         if r.status_code != 200:
             log.warning("airdcpp: hub_search %r -> %s %s", pattern, r.status_code, _truncate(r.text))
             return False

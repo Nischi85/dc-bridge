@@ -8,6 +8,12 @@ airdcpp:
   username: CHANGE_ME
   password: CHANGE_ME
   hub_urls: []              # empty = search all connected hubs
+  # Minimum gap between hub_search dispatches, enforced across ALL tracked
+  # items (not just within one item's own search pacing). Without this,
+  # concurrent searches for different movies/series can land close enough
+  # together that a hub's flood protection silently drops one, producing a
+  # false "0 results" for an otherwise-available release.
+  min_search_interval_seconds: 15
 
 sonarr:
   url: http://CHANGE.ME:8989
