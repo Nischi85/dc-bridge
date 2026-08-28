@@ -247,6 +247,7 @@ doesn't change the repository field won't re-pull.
 | `GET /state?only_active=true` | Show the active worklist. |
 | `GET /metrics` | Operational snapshot: process counters (searches/queues/errors since start) + state.db-derived stats (grabs last 24h/7d, active item count, and `stale_tracking` — any active item whose tracking data hasn't actually been refreshed by a sync pass in over 2x the auto-sync interval, even if periodic syncs are otherwise succeeding). Check this first for "why didn't X download." |
 | `GET /airdcpp/probe?q=<query>` | Dry-run a hub search (no download) to sanity-check results. |
+| `POST /repair` `{release_dir, missing_files}` | Human-triggered only (called by media-audit's UI, never automatically): search the hub for a source with the EXACT same release name as `release_dir`'s own folder, and download just `missing_files` into it. Used to patch a release media-audit's `sfv_integrity` check found missing volumes in. See `dcbridge/repair.py` for the identity-matching rules. |
 | webhooks: `POST /webhook/{sonarr,radarr}` | Where Sonarr/Radarr notify the bridge (series/movie add → immediate search). |
 | `POST /webhook/jellyseerr` | Where Jellyseerr notifies the bridge; approves + syncs + searches freshly-requested items now. |
 

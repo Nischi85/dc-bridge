@@ -28,6 +28,7 @@ from dcbridge.state import (
 from dcbridge.airdcpp import (
     AirDCPP,
 )
+from dcbridge.repair import repair_release
 from dcbridge.arr import (
     _sync_jellyseerr,
     _sync_radarr,
@@ -63,6 +64,11 @@ class SonarrWebhook(BaseModel):
 class RadarrWebhook(BaseModel):
     eventType: str
     movie: Optional[dict] = None
+
+
+class RepairRequest(BaseModel):
+    release_dir: str
+    missing_files: list[str]
 
 
 async def _handle_jellyseerr_failed(cfg: Config) -> None:
@@ -226,6 +232,16 @@ def make_app(cfg: Config) -> FastAPI:
             for r in results
         ]
         return {"instance": iid, "count": len(results), "results": preview}
+
+    @app.post("/repair")
+    async def repair(body: RepairRequest):
+        """Human-triggered only — see dcbridge/repair.py's own docstring for
+        why this is never called automatically. release_dir is the real
+        filesystem path of the (already on-disk) release folder; only the
+        listed missing_files are searched for and downloaded, everything
+        else already there is left alone."""
+        ad: AirDCPP = app.state.airdcpp
+        return await repair_release(cfg, ad, body.release_dir, body.missing_files)
 
     @app.post("/poll/{item_id:path}")
     async def poll_now(item_id: str, force: bool = False):
