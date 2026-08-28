@@ -65,7 +65,11 @@ def test_exact_name_directory_match_is_queued_as_a_whole_folder():
     assert outcome["ok"] is True
     assert outcome["queued"] == ["some.release-group.r42", "some.release-group.r58"]
     assert outcome["not_found"] == []
-    assert ad.queued == [("RESULT_ID_1", "Z:\\Movies\\Some.Release-GROUP\\")]
+    # Target is the release's PARENT dir — AirDC++ appends the result's own
+    # folder name itself. Passing the release dir itself (the old bug) made
+    # AirDC++ nest a full duplicate copy inside the existing folder instead
+    # of merging into it (caught live 2026-08-28, Jesse Stone/Lilo & Stitch).
+    assert ad.queued == [("RESULT_ID_1", "Z:\\Movies\\")]
     assert ad.deleted_instances == [1]
 
 

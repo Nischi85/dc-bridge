@@ -84,8 +84,18 @@ async def repair_release(
     # thing that crashed this endpoint in production before this check
     # existed: media-audit sent its own container path, not dc-bridge's),
     # not something worth a wasted hub search to discover.
+    #
+    # The target must be the release's PARENT directory, not the release
+    # folder itself — AirDC++ appends the directory result's own folder name
+    # to whatever target it's given (same convention as poller.py's
+    # parent_for_folder for an ordinary grab). Passing the release folder
+    # itself made AirDC++ create a full nested duplicate of the release
+    # INSIDE the existing release folder instead of merging into it — caught
+    # live 2026-08-28 on two real repairs (Jesse Stone, Lilo & Stitch), each
+    # left with a byte-exact duplicate copy of the whole release nested one
+    # level deeper.
     try:
-        target_smb = _to_smb_dir(release_dir_fs, cfg.path_map)
+        target_smb = _to_smb_dir(str(Path(release_dir_fs).parent), cfg.path_map)
     except ValueError as e:
         return {"ok": False, "error": f"path translation failed: {e}", "queued": [], "not_found": list(missing_files)}
 
