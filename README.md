@@ -134,9 +134,18 @@ and `*.log` are gitignored).
      --network br0 --ip <bridge-ip> \
      -v /path/to/dc-bridge-config:/config \
      -e CONFIG_PATH=/config/config.yaml \
-     --restart unless-stopped \
+     --restart no \
+     --label net.unraid.docker.managed=dockerman \
      dc-bridge:latest
    ```
+   `--restart no` is deliberate on unRAID: whether the container comes back
+   after a reboot should be controlled *only* by unRAID's own Docker-page
+   Autostart checkbox (adds/removes the container name from
+   `/var/lib/docker/unraid-autostart`, read at boot by `/etc/rc.d/rc.docker`),
+   not Docker's own daemon-restart policy. `net.unraid.docker.managed` is
+   required for that checkbox to render at all — without it, unRAID's Docker
+   page shows literal "3rd Party" text instead. On a host without this
+   concern, `--restart unless-stopped` is the more conventional choice.
 
 4. **Wire the webhooks** in Sonarr and Radarr (Settings → Connect → Webhook):
    - URL: `http://<bridge-ip>:8000/webhook/sonarr` and `.../webhook/radarr`
