@@ -70,6 +70,7 @@ class State:
             ("alt_titles",          "ALTER TABLE tracked_items ADD COLUMN alt_titles TEXT"),
             ("episode_air_years",   "ALTER TABLE tracked_items ADD COLUMN episode_air_years TEXT"),
             ("last_synced_at",      "ALTER TABLE tracked_items ADD COLUMN last_synced_at INTEGER"),
+            ("drain_misses",        "ALTER TABLE tracked_items ADD COLUMN drain_misses INTEGER"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -118,7 +119,8 @@ class State:
         "id, kind, title, target_dir_fs, monitored_keys, request_status,"
         " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
         " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
-        " requested_seasons, alt_titles, episode_air_years, last_synced_at"
+        " requested_seasons, alt_titles, episode_air_years, last_synced_at,"
+        " drain_misses"
     )
 
     @staticmethod
@@ -143,6 +145,7 @@ class State:
             "alt_titles": json.loads(r[16]) if r[16] else [],
             "episode_air_years": json.loads(r[17]) if r[17] else {},
             "last_synced_at": r[18],
+            "drain_misses": r[19] or 0,
         }
 
     async def list_items(self) -> list[dict]:
@@ -218,6 +221,18 @@ class State:
             self._update_if_changed(
                 "UPDATE tracked_items SET search_backlog = ?"
                 " WHERE id = ? AND search_backlog IS NOT ?",
+                (int(n), item_id, int(n)),
+            )
+
+    async def set_drain_misses(self, item_id: str, n: int) -> None:
+        """Consecutive 'draining' polls that searched but queued nothing. At
+        cfg.poller.max_fruitless_drain_polls the poller clears search_backlog so
+        the item leaves the every-sweep drain for the normal content-age
+        back-off. Reset to 0 the moment a poll queues an episode."""
+        async with self._lock:
+            self._update_if_changed(
+                "UPDATE tracked_items SET drain_misses = ?"
+                " WHERE id = ? AND drain_misses IS NOT ?",
                 (int(n), item_id, int(n)),
             )
 

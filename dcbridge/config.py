@@ -97,6 +97,14 @@ class PollerCfg(BaseModel):
     tv_search_settle_seconds: float = 15.0
     tv_search_gap_seconds: float = 15.0
     tv_max_search_per_poll: int = 8
+    # A 'draining' TV backfill (more than tv_max_search_per_poll episodes wanted
+    # at once) re-searches every sweep until it clears. If it keeps searching and
+    # queuing NOTHING for this many polls in a row, its remaining episodes are
+    # treated as currently-unavailable: search_backlog is cleared and the item
+    # drops into the normal content-age back-off (so it stops blocking every
+    # other item — hub searches are globally serialised). Any episode queued
+    # resets the count. 0 disables (drain forever — the old behaviour).
+    max_fruitless_drain_polls: int = 3
     # Stalled-grab fallback (TV episodes). A queued bundle that has downloaded 0
     # bytes and is older than stall_grace_minutes is treated as dead-sourced
     # ("File not available" / gone). The bridge removes it, remembers the release

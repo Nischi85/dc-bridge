@@ -453,6 +453,11 @@ async def poller_loop(app: FastAPI) -> None:
             log.info("poller sweep: %d item(s) to search", len(items))
             # One disk probe per movie for the whole sweep, shared by the schedule
             # report and every poll_item, instead of each re-probing the same movie.
+            # Least-recently-searched first: a fresh request (last_searched_at=0)
+            # or a long-overdue item gets its turn before one that just ran, so a
+            # single slow/large backfill can't keep newer requests waiting out a
+            # whole sweep (hub searches are globally serialised).
+            items.sort(key=lambda it: int(it.get("last_searched_at") or 0))
             completion = await build_completion_cache(ad, cfg, state, items, now_ts)
             # One AirDC++ queue snapshot for the whole sweep — the queue is global,
             # so every poll_item shares it instead of re-fetching per item.
@@ -1322,6 +1327,7 @@ async def _poll_item(
                          item_id, len(needed_keys))
         if not needed_keys:
             await state.set_search_backlog(item_id, 0)  # nothing left; resume normal cadence
+            await state.set_drain_misses(item_id, 0)
             if decision["status"] == "initial" and await state.get_completed_keys(item_id):
                 # Spend the fresh-request probe when the series has completion
                 # history — a re-request of an already-complete series must not
@@ -1364,6 +1370,13 @@ async def _poll_item(
         # searched, capped per poll; any remainder is picked up on the next sweep.
         eks = sorted(needed_keys)
         cap = max(1, cfg.poller.tv_max_search_per_poll)
+        # On a multi-sweep drain, rotate the window so successive polls cover NEW
+        # episodes instead of re-searching the lowest `cap` every time. drain_misses
+        # advances while stuck and resets on progress, so it doubles as the
+        # rotation counter — no extra state needed.
+        if len(eks) > cap:
+            off = (int(item.get("drain_misses") or 0) * cap) % len(eks)
+            eks = eks[off:] + eks[:off]
         deferred = eks[cap:]
         # Keep the item due every sweep until this backlog drains (see
         # compute_cadence 'draining'), instead of falling into the age back-off
@@ -1425,6 +1438,25 @@ async def _poll_item(
                 await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
         log.info("poll %s: searched %d episode(s), %d hub result(s), queued %d",
                  item_id, len(batch), total_results, queued)
+        # Fruitless-drain backoff: a 'draining' item that keeps searching and
+        # queuing nothing burns the (globally serialised) search slot every sweep
+        # and blocks every other item. After cfg.poller.max_fruitless_drain_polls
+        # such polls in a row, clear search_backlog so it drops into the normal
+        # content-age back-off; any episode queued resets the count so a backfill
+        # that IS making progress keeps its fast drain.
+        if decision["status"] == "draining" and cfg.poller.max_fruitless_drain_polls > 0:
+            if queued:
+                await state.set_drain_misses(item_id, 0)
+            else:
+                misses = int(item.get("drain_misses") or 0) + 1
+                if misses >= cfg.poller.max_fruitless_drain_polls:
+                    await state.set_search_backlog(item_id, 0)
+                    await state.set_drain_misses(item_id, 0)
+                    log.info("poll %s: %d fruitless drain poll(s) — clearing backlog;"
+                             " %d wanted episode(s) drop to normal back-off",
+                             item_id, misses, len(needed_keys))
+                else:
+                    await state.set_drain_misses(item_id, misses)
     else:
         # Canonical title first, then its pre-subtitle-separator short form (if any) —
         # a scene release commonly drops a documentary/subtitle's descriptive tail

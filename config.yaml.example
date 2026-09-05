@@ -103,6 +103,12 @@ poller:
   tv_search_settle_seconds: 15   # wait for hub results after firing each search
   tv_search_gap_seconds: 15      # extra pause before the next episode's search
   tv_max_search_per_poll: 8      # episodes searched per poll; rest picked up next sweep
+  # A large backfill (>tv_max_search_per_poll episodes) re-searches every sweep
+  # until it clears. If it searches and queues NOTHING this many polls running,
+  # its remaining episodes are treated as unavailable: the backlog clears and it
+  # drops to the normal back-off (so it stops blocking every other item). Any
+  # episode queued resets the count. 0 = drain forever.
+  max_fruitless_drain_polls: 3
   # Stalled-grab fallback (TV). A queued episode bundle that downloaded 0 bytes
   # and is older than this is treated as dead-sourced (e.g. "File not available"):
   # the bridge removes it, remembers the release so it isn't re-grabbed, and

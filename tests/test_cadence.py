@@ -135,6 +135,18 @@ def test_draining_backlog_is_due_even_while_gated():
     assert "3 episode" in d["detail"]
 
 
+def test_cleared_backlog_falls_back_to_the_content_age_backoff():
+    # After poll_item's fruitless-drain backoff zeroes search_backlog, an old
+    # backfill must land in its normal tier — not keep searching every sweep.
+    old_air = NOW - 200 * 86400  # 90-day tier -> 7-day gap
+    item = _tv_item(air_anchor_utc=_utc_iso(old_air), search_backlog=0,
+                     last_searched_at=NOW - 3600, request_created_at=NOW - 300 * 86400)
+    d = compute_cadence(item, _cfg(backoff=[
+        BackoffTier(older_than_days=90, search_every_seconds=7 * 86400),
+    ]), NOW)
+    assert d["due"] is False and d["status"] == "backoff"
+
+
 # ── content-age back-off ─────────────────────────────────────────────────────
 
 
