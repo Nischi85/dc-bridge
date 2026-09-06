@@ -37,6 +37,7 @@ from dcbridge.helpers import (
     release_matches_title,
     release_matches_year,
     release_starts_with_title,
+    resolve_lang_priority,
     sanitize_for_dc_search,
     score_result,
     season_of_episode_key,
@@ -960,6 +961,7 @@ async def _queue_candidates(
     ad: AirDCPP, state: State, cfg: Config, iid: str, kind: str, item_id: str,
     candidates_by_key: dict[str, list[dict[str, Any]]], in_queue_keys: set[str],
     target_base_smb: str, item_priority: list[str],
+    lang_priority: Optional[list[str]] = None,
 ) -> int:
     """Queue the best release for each still-needed key into AirDC++, mirroring
     the hub's sub-folder layout (Sample/, etc.) under the destination. Returns the
@@ -985,7 +987,7 @@ async def _queue_candidates(
         best = max(
             candidates,
             key=lambda g: score_result(
-                g["release_name"], g["total_size"], cfg.quality, item_priority
+                g["release_name"], g["total_size"], cfg.quality, item_priority, lang_priority
             ),
         )
         release_name: str = best["release_name"]
@@ -1180,6 +1182,9 @@ async def _poll_item(
     # Quality preference comes from this item's Sonarr/Radarr profile (resolved at
     # sync time); empty falls back to the config quality rules.
     item_priority = item.get("quality_priority") or []
+    # Per-path audio-language preference (quality.language_priority) — e.g.
+    # Swedish-then-English for anything under TV.For.Children. Empty otherwise.
+    lang_priority = resolve_lang_priority(cfg.quality, target_dir_fs)
 
     # Fast-skip movies whose grab is genuinely done. A completed marker only
     # records that we QUEUED a release — verify it actually landed on disk (via
@@ -1423,6 +1428,7 @@ async def _poll_item(
                         queued += await _queue_candidates(
                             ad, state, cfg, ep_iid, kind, item_id,
                             candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+                            lang_priority,
                         )
                         break
                 finally:
@@ -1519,6 +1525,7 @@ async def _poll_item(
                 queued = await _queue_candidates(
                     ad, state, cfg, winning_iid, kind, item_id,
                     candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+                    lang_priority,
                 )
             finally:
                 try:

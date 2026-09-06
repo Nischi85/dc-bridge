@@ -289,6 +289,44 @@ def test_score_result_repack_tag_not_triggered_by_a_title_word():
     assert b > a  # pure size tiebreak, no repack bonus muddying it
 
 
+# ── per-path audio-language preference ──────────────────────────────────────
+
+
+def test_lang_priority_beats_a_better_quality_tier():
+    q = _quality(priority=["web 1080p", "web 720p"])
+    lp = ["swedish", "english"]
+    swe_worse = score_result("PAW.Patrol.2023.NORDiC.720p.WEB.H264-EGEN", 900 * 1024 * 1024, q, None, lp)
+    eng_better = score_result("PAW.Patrol.2023.1080p.WEB.H264-DOLORES", 5000 * 1024 * 1024, q, None, lp)
+    assert swe_worse > eng_better  # Swedish wins even at a worse resolution
+
+
+def test_lang_priority_neutral_when_no_rule_matches():
+    q = _quality(priority=["web 1080p", "web 720p"])
+    # lang_priority empty -> language is neutral, tier decides as before
+    swe_720 = score_result("X.2023.SWEDiSH.720p.WEB-GRP", 900 * 1024 * 1024, q, None, [])
+    eng_1080 = score_result("X.2023.1080p.WEB-GRP", 900 * 1024 * 1024, q, None, [])
+    assert eng_1080 > swe_720
+
+
+def test_lang_priority_untagged_release_counts_as_english():
+    q = _quality(priority=["web 1080p"])
+    lp = ["swedish", "english"]
+    eng_untagged = score_result("Movie.2023.1080p.WEB.H264-GRP", 1000 * 1024 * 1024, q, None, lp)
+    danish = score_result("Movie.2023.DANiSH.1080p.WEB.H264-GRP", 1000 * 1024 * 1024, q, None, lp)
+    assert eng_untagged > danish  # english is listed; danish isn't -> english preferred
+
+
+def test_release_languages_maps_nordic_to_swedish():
+    from dcbridge.helpers import release_languages, resolve_lang_priority
+    from dcbridge.config import LanguageRule
+    assert "swedish" in release_languages("Show.S01E01.NORDiC.1080p.WEB-GRP")
+    assert release_languages("Show.S01E01.1080p.WEB-GRP") == {"english"}
+    q = _quality(language_priority=[LanguageRule(path_contains="TV.For.Children",
+                                                 languages=["Swedish", "English"])])
+    assert resolve_lang_priority(q, "/mnt/zzd/share/fin/TV.For.Children/Series/Bluey") == ["swedish", "english"]
+    assert resolve_lang_priority(q, "/mnt/zzd/share/fin/TV.Series/Cobra.Kai") == []
+
+
 # ── text sanitisation ──────────────────────────────────────────────────────────
 
 

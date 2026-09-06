@@ -774,8 +774,58 @@ _REPACK_TAG_RE = re.compile(
 # then repack/proper, then size. 1e6 comfortably exceeds any real total-size MB
 # (a 1 TB release is 1e6 MB); the repack bump sits an order of magnitude below the
 # tier step so it only ever breaks a tie WITHIN a tier.
+_LANG_BONUS = 1_000_000_000   # ranks ABOVE quality tier (0 when no rule matches)
 _TIER = 10_000_000
 _REPACK_BONUS = 1_000_000
+
+# Scene language tags -> canonical name. "swedish" also covers NORDiC (a
+# multi-dub pack that includes Swedish). A release matching none of these is
+# treated as English (the scene default for an unmarked release).
+_LANG_ALIASES: dict[str, tuple[str, ...]] = {
+    "swedish": (r"\bswedish\b", r"\bnordic\b", r"\bnordics\b", r"\bswesub\b"),
+    "english": (r"\benglish\b",),
+    "danish": (r"\bdanish\b",),
+    "norwegian": (r"\bnorwegian\b", r"\bnorsk\b"),
+    "finnish": (r"\bfinnish\b",),
+    "icelandic": (r"\bicelandic\b",),
+    "german": (r"\bgerman\b",),
+    "french": (r"\bfrench\b", r"\btruefrench\b", r"\bvff\b", r"\bvfq\b"),
+    "dutch": (r"\bdutch\b",),
+    "spanish": (r"\bspanish\b", r"\bcastellano\b"),
+    "italian": (r"\bitalian\b",),
+    "polish": (r"\bpolish\b",),
+}
+_LANG_RE = {lang: [re.compile(p, re.I) for p in pats] for lang, pats in _LANG_ALIASES.items()}
+
+
+def release_languages(name: str) -> set[str]:
+    """Audio languages a release name advertises. Unmarked -> {"english"}."""
+    n = name.lower()
+    found = {lang for lang, rs in _LANG_RE.items() if any(r.search(n) for r in rs)}
+    return found or {"english"}
+
+
+def _lang_score(name: str, priority: list[str]) -> int:
+    """Higher = a more-preferred audio language. 0 when `priority` is empty
+    (no rule matched — neutral) or the release's language isn't listed."""
+    if not priority:
+        return 0
+    langs = release_languages(name)
+    for i, want in enumerate(priority):
+        if want.lower() in langs:
+            return len(priority) - i
+    return 0
+
+
+def resolve_lang_priority(quality: QualityCfg, target_dir_fs: Optional[str]) -> list[str]:
+    """The language preference order for an item, by the first
+    quality.language_priority rule whose path_contains matches its target
+    dir. Empty list = no preference."""
+    t = target_dir_fs or ""
+    for rule in quality.language_priority:
+        if rule.path_contains and rule.path_contains in t:
+            return [lang.lower() for lang in rule.languages]
+    return []
 
 
 def is_repack(name: str) -> bool:
@@ -789,21 +839,24 @@ def is_repack(name: str) -> bool:
 def score_result(
     name: str, size_bytes: int, quality: QualityCfg,
     priority: Optional[list[str]] = None,
+    lang_priority: Optional[list[str]] = None,
 ) -> int:
-    """Higher is better. Ranks by quality PREFERENCE — the per-item *arr profile
-    order (priority) if available, else the config `priority`, else the
-    `resolutions` order — then, within a tier, a REPACK/PROPER over a plain
-    release (quality.prefer_repack), then larger size."""
+    """Higher is better. Ranks by, in order: preferred AUDIO LANGUAGE (only
+    when `lang_priority` is set for this item — otherwise neutral); then
+    quality PREFERENCE (the per-item *arr profile order `priority` if given,
+    else config `priority`, else `resolutions`); then, within a tier, a
+    REPACK/PROPER over a plain release (quality.prefer_repack); then size."""
     name_l = name.lower()
     mb = int(size_bytes // (1024 * 1024))
+    lang = _lang_score(name_l, lang_priority or []) * _LANG_BONUS
     repack = _REPACK_BONUS if (quality.prefer_repack and is_repack(name_l)) else 0
     pri = priority or quality.priority
     if pri:
         rank = _priority_rank(name_l, pri)
         rank = len(pri) if rank is None else rank
-        return (len(pri) - rank) * _TIER + repack + mb
+        return lang + (len(pri) - rank) * _TIER + repack + mb
     res = quality.resolutions
     rank = next((i for i, r in enumerate(res) if r.lower() in name_l), len(res))
-    return (len(res) - rank) * _TIER + repack + mb
+    return lang + (len(res) - rank) * _TIER + repack + mb
 
 

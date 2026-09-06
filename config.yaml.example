@@ -77,6 +77,15 @@ quality:
   # fixes the first one — bad sync, corrupt volumes, wrong runtime) over the
   # plain release. Only breaks a tie inside a tier; never changes tier order.
   prefer_repack: true
+  # Per-path audio-language preference. For an item whose target dir contains
+  # `path_contains`, releases are ranked by `languages` order ABOVE quality
+  # tier — a preferred-language release beats a better-quality one in another
+  # language (kids can't read subtitles). "swedish" also matches NORDiC
+  # multi-dub packs; an untagged release counts as "english". First matching
+  # rule wins; omit / empty list = no language preference.
+  language_priority:
+    - path_contains: TV.For.Children
+      languages: [swedish, english]
 
 poller:
   interval_seconds: 900       # 15 min per full sweep

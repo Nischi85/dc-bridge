@@ -57,6 +57,11 @@ class PathTranslate(BaseModel):
     fs_prefix: str
 
 
+class LanguageRule(BaseModel):
+    path_contains: str          # substring of the item's target dir (e.g. "TV.For.Children")
+    languages: list[str] = []   # preference order, e.g. ["swedish", "english"]
+
+
 class QualityCfg(BaseModel):
     # Name of the Sonarr/Radarr quality profile (same name in both apps, e.g.
     # "DC Single") that decides which qualities to grab and in what order. The
@@ -78,6 +83,13 @@ class QualityCfg(BaseModel):
     # fixes the original — sync, corrupt volumes, wrong runtime). Only ever
     # breaks a tie inside a tier; never overrides the priority order itself.
     prefer_repack: bool = True
+    # Per-path audio-language preference. For an item whose target dir contains
+    # `path_contains`, releases are ranked by `languages` order ABOVE quality
+    # tier — a preferred-language release wins over a better-quality one in
+    # another language (kids can't read subs). "swedish" also matches NORDiC
+    # multi-dub packs; a release with no language tag counts as "english".
+    # First matching rule wins; empty list = no language preference (default).
+    language_priority: list[LanguageRule] = []
 
 
 class BackoffTier(BaseModel):
