@@ -74,6 +74,10 @@ class QualityCfg(BaseModel):
     resolutions: list[str] = []        # legacy: accepted resolutions, in preference order
     episode_size_mb: tuple[int, int]
     movie_size_mb: tuple[int, int]
+    # Within one quality tier, prefer a REPACK / PROPER (a scene re-release that
+    # fixes the original — sync, corrupt volumes, wrong runtime). Only ever
+    # breaks a tie inside a tier; never overrides the priority order itself.
+    prefer_repack: bool = True
 
 
 class BackoffTier(BaseModel):

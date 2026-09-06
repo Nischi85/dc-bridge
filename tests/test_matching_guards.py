@@ -259,6 +259,36 @@ def test_score_result_size_is_tiebreak_within_same_tier():
     assert big > small
 
 
+def test_score_result_prefers_a_repack_over_a_bigger_plain_release_same_tier():
+    q = _quality(priority=["web 1080p"])
+    plain_big = score_result("Show.S01E01.1080p.WEB.H264-GRP", 5000 * 1024 * 1024, q)
+    repack = score_result("Show.S01E01.REPACK.1080p.WEB.H264-GRP", 500 * 1024 * 1024, q)
+    proper = score_result("Show.S01E01.PROPER.1080p.WEB.H264-OTHER", 500 * 1024 * 1024, q)
+    assert repack > plain_big and proper > plain_big
+
+
+def test_score_result_repack_never_beats_a_better_quality_tier():
+    q = _quality(priority=["web 1080p", "web 720p"])
+    better_plain = score_result("Show.S01E01.1080p.WEB.H264-GRP", 500 * 1024 * 1024, q)
+    worse_repack = score_result("Show.S01E01.REPACK.720p.WEB.H264-GRP", 5000 * 1024 * 1024, q)
+    assert better_plain > worse_repack
+
+
+def test_score_result_repack_preference_can_be_disabled():
+    q = _quality(priority=["web 1080p"], prefer_repack=False)
+    plain_big = score_result("Show.S01E01.1080p.WEB.H264-GRP", 5000 * 1024 * 1024, q)
+    repack_small = score_result("Show.S01E01.REPACK.1080p.WEB.H264-GRP", 500 * 1024 * 1024, q)
+    assert plain_big > repack_small  # falls back to pure size tiebreak
+
+
+def test_score_result_repack_tag_not_triggered_by_a_title_word():
+    q = _quality(priority=["web 1080p"])
+    # "Proper" as a title word, not a scene tag — must not get the bump.
+    a = score_result("The.Proper.Way.2023.1080p.WEB.H264-GRP", 1000 * 1024 * 1024, q)
+    b = score_result("The.Proper.Way.2023.1080p.WEB.H264-GRP", 2000 * 1024 * 1024, q)
+    assert b > a  # pure size tiebreak, no repack bonus muddying it
+
+
 # ── text sanitisation ──────────────────────────────────────────────────────────
 
 

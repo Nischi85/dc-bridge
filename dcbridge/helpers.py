@@ -757,22 +757,53 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
     return {"due": True, "status": "due", "next_due": now_ts, "detail": detail}
 
 
+# A scene REPACK / PROPER / RERIP tag — a fixed re-release of an earlier one.
+# Only counts in the technical tail (from the first year or SxxExx marker
+# onward), never inside the title itself — so "The.Proper.Way.2023..." doesn't
+# register, but "...2023.PROPER.1080p..." and "...S01E01.REPACK..." do.
+_REPACK_TAIL_RE = re.compile(
+    r"(?:^|[.\s_-])(?:19|20)\d\d(?=[.\s_-]|$)"
+    r"|(?:^|[.\s_-])s\d{1,2}(?:e\d{1,3})?(?=[.\s_-]|$)",
+    re.IGNORECASE,
+)
+_REPACK_TAG_RE = re.compile(
+    r"(?:^|[.\s_-])(?:repack|proper|rerip)\d*(?=[.\s_-]|$)", re.IGNORECASE
+)
+
+# Score is layered so each field can't bleed into the next: quality tier dominates,
+# then repack/proper, then size. 1e6 comfortably exceeds any real total-size MB
+# (a 1 TB release is 1e6 MB); the repack bump sits an order of magnitude below the
+# tier step so it only ever breaks a tie WITHIN a tier.
+_TIER = 10_000_000
+_REPACK_BONUS = 1_000_000
+
+
+def is_repack(name: str) -> bool:
+    """True if this release name carries a REPACK / PROPER / RERIP tag (in the
+    technical tail, not the title)."""
+    m = _REPACK_TAIL_RE.search(name)
+    tail = name[m.start():] if m else name
+    return _REPACK_TAG_RE.search(tail) is not None
+
+
 def score_result(
     name: str, size_bytes: int, quality: QualityCfg,
     priority: Optional[list[str]] = None,
 ) -> int:
     """Higher is better. Ranks by quality PREFERENCE — the per-item *arr profile
     order (priority) if available, else the config `priority`, else the
-    `resolutions` order — then larger size as a tiebreak within the same tier."""
+    `resolutions` order — then, within a tier, a REPACK/PROPER over a plain
+    release (quality.prefer_repack), then larger size."""
     name_l = name.lower()
     mb = int(size_bytes // (1024 * 1024))
+    repack = _REPACK_BONUS if (quality.prefer_repack and is_repack(name_l)) else 0
     pri = priority or quality.priority
     if pri:
         rank = _priority_rank(name_l, pri)
         rank = len(pri) if rank is None else rank
-        return (len(pri) - rank) * 1_000_000 + mb
+        return (len(pri) - rank) * _TIER + repack + mb
     res = quality.resolutions
     rank = next((i for i, r in enumerate(res) if r.lower() in name_l), len(res))
-    return (len(res) - rank) * 1_000_000 + mb
+    return (len(res) - rank) * _TIER + repack + mb
 
 

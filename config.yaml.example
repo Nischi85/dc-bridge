@@ -73,6 +73,10 @@ quality:
   # TV episode are typically 1.5–4 GB total. Always applied, on top of the profile.
   episode_size_mb: [200, 12000]
   movie_size_mb: [1000, 30000]
+  # Within one quality tier, prefer a REPACK / PROPER (a scene re-release that
+  # fixes the first one — bad sync, corrupt volumes, wrong runtime) over the
+  # plain release. Only breaks a tie inside a tier; never changes tier order.
+  prefer_repack: true
 
 poller:
   interval_seconds: 900       # 15 min per full sweep
