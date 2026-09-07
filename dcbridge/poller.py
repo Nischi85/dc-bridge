@@ -1482,6 +1482,10 @@ async def _poll_item(
         winning_iid = None
         candidates_by_key: dict[str, list[dict[str, Any]]] = {}
         attempted = False
+        # Releases already tried and rejected for this movie (stall fallback, or
+        # a manual blocklist entry) — same exclusion the TV branch applies per
+        # episode, keyed on the lone "movie" key.
+        movie_exclude = await state.get_failed_releases(item_id, "movie")
         for vi, title_variant in enumerate(title_variants):
             variant_query = query if vi == 0 else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
             iid = await ad.create_search_instance()
@@ -1501,6 +1505,7 @@ async def _poll_item(
                 )
                 variant_candidates = _select_candidates(
                     results, kind, title_variant, item, cfg, item_priority, needed_keys, item_id,
+                    exclude_releases=movie_exclude,
                     require_year=(title_variant == short_title),
                 )
                 if variant_candidates:
