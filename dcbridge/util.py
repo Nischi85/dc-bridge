@@ -170,6 +170,44 @@ def _sfv_verified_complete(dir_fs: Path) -> Optional[bool]:
     return expected.issubset(present)
 
 
+def _release_complete_on_disk(dir_fs: Path) -> Optional[bool]:
+    """One on-disk completeness verdict for a release folder, read straight off
+    dc-bridge's read-only bind mount of the real storage (no AirDC++ call):
+
+      True  — verified complete
+      False — the folder is gone, or present but incomplete (an .sfv that
+              doesn't verify, or no .sfv and not even a first RAR volume /
+              video file)
+      None  — a transient filesystem error (the parent itself isn't readable);
+              the caller must not act on that uncertainty
+
+    Prefers the .sfv manifest cross-check (_sfv_verified_complete); with no
+    readable .sfv, falls back to _release_complete's rule — a first RAR volume
+    (.rar) or a playable video present."""
+    try:
+        parent_ok = dir_fs.parent.is_dir()
+    except OSError:
+        parent_ok = False
+    if not parent_ok:
+        return None  # can't even read the season/series dir — mount problem
+    try:
+        entries = list(dir_fs.iterdir())
+    except FileNotFoundError:
+        return False  # parent readable, this folder genuinely absent → dead grab
+    except OSError:
+        return None
+    verdict = _sfv_verified_complete(dir_fs)
+    if verdict is not None:
+        return verdict
+    for p in entries:
+        try:
+            if p.is_file() and p.name.lower().endswith((".rar", *_VIDEO_EXT)):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _series_keys_in_queue(bundles: list[dict], title: str) -> set[str]:
     """Episode keys (SxxExx) that already have a bundle in the AirDC++ queue for
     this series — whether the bridge or the user queued them — so we neither

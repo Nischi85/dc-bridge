@@ -51,6 +51,7 @@ from dcbridge.util import (
     _movie_in_queue,
     _parent_dir_and_name,
     _release_complete,
+    _release_complete_on_disk,
     _series_keys_in_queue,
     _sfv_verified_complete,
     _to_smb_dir,
@@ -680,7 +681,7 @@ async def remove_stalled_tv_bundles(
     return len(dropped)
 
 
-async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) -> None:
+async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) -> int:
     """Confirms Sonarr actually imported every episode this item's bridge grabs
     completed — remove_finished_tv_bundles firing trigger_arr_rescan proves a
     rescan was *requested*, not that it *succeeded*. Seen live: AirDC++ finished
@@ -692,6 +693,17 @@ async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) 
     since remove_finished_tv_bundles only rescans once, at the moment the
     bundle disappears from AirDC++'s queue.
 
+    For a still-not-imported episode, first checks whether the grab is even
+    complete on disk (_release_complete_on_disk). A partial/dead grab — the
+    Reacher S04E02 case, 2026-09-09: `.r00`–`.r10` on disk but no `.rar`
+    first volume and no `.sfv`, so rargate strict-hides it and Sonarr has
+    nothing to import — will never import no matter how many rescans fire,
+    and the completed marker permanently blocks a re-search. Such an episode
+    is treated like a stalled bundle (remove_stalled_tv_bundles): the marker
+    is dropped, the release blocklisted (`failed_releases`), and the count
+    returned so the caller forces a re-search this sweep. This mirrors the
+    movie side's `_classify_movie_completion` "stalled" path.
+
     Mirrors arr.py's movie-side import_verified marker (same `completed`
     table, so no schema change) but per episode key — a "<key>:verified"
     marker never collides with a real SxxExx key, and a show can have some
@@ -701,38 +713,60 @@ async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) 
     Kept cheap on purpose: bails immediately (no Sonarr call) for the
     overwhelming common case of nothing pending, and only re-triggers a
     rescan for keys that have been stuck past a grace period — never every
-    sweep — so a real recurrence costs one Sonarr episode-list call and one
-    rescan command, not a filesystem scan or an AirDC++ call.
+    sweep. Returns the number of markers invalidated as broken grabs.
     """
     item_id = item["id"]
     markers = await state.get_completed_keys(item_id)  # [(key, release_name, queued_at), ...]
     pending = [
-        (k, qat) for k, rel, qat in markers
+        (k, rel, qat) for k, rel, qat in markers
         if rel and rel != "(pre-existing)" and ":" not in k
     ]
     if not pending:
-        return
+        return 0
     unverified = [
-        (k, qat) for k, qat in pending
+        (k, rel, qat) for k, rel, qat in pending
         if not await state.is_completed(item_id, f"{k}:verified")
     ]
     if not unverified:
-        return
+        return 0
 
     grace = max(cfg.poller.interval_seconds * 2, 1800)
-    due = [(k, qat) for k, qat in unverified if now_ts - int(qat or 0) >= grace]
+    due = [(k, rel, qat) for k, rel, qat in unverified if now_ts - int(qat or 0) >= grace]
     if not due:
-        return  # still within the grace window; give the one-shot rescan time to land
+        return 0  # still within the grace window; give the one-shot rescan time to land
 
     have = await sonarr_imported_episode_keys(cfg, item_id)
     if have is None:
-        return  # Sonarr unreachable; retry next sweep rather than act on uncertainty
+        return 0  # Sonarr unreachable; retry next sweep rather than act on uncertainty
 
-    newly_verified = still_missing = 0
-    for key, _qat in due:
+    series_root = Path(item["target_dir_fs"])
+    try:
+        root_ok = series_root.is_dir()
+    except OSError:
+        root_ok = False
+
+    newly_verified = still_missing = invalidated = 0
+    for key, rel, _qat in due:
         if key in have:
             await state.mark_completed(item_id, f"{key}:verified", None, "(verified)")
             newly_verified += 1
+            continue
+        # Not imported. Before re-nudging Sonarr, check the grab is actually
+        # complete on disk — a partial/dead grab never imports, and its
+        # marker would block a re-search forever.
+        broken = False
+        if root_ok:
+            season = season_of_episode_key(key) or 0
+            broken = _release_complete_on_disk(series_root / f"Season.{season}" / rel) is False
+        if broken:
+            await state.clear_completed(item_id, key)
+            await state.add_failed_release(item_id, key, rel)
+            invalidated += 1
+            log.warning(
+                "poll %s: %s completed grab %r is incomplete/gone on disk — dropping "
+                "the marker and re-searching for a fresh release",
+                item_id, key, rel,
+            )
         else:
             still_missing += 1
     if newly_verified:
@@ -744,6 +778,7 @@ async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) 
             item_id, still_missing, grace / 60,
         )
         await trigger_arr_rescan(cfg, item_id)
+    return invalidated
 
 
 def _select_candidates(
@@ -1278,13 +1313,16 @@ async def _poll_item(
         # episodes re-enter needed_keys and get retried with a different release.
         freed = await remove_stalled_tv_bundles(ad, state, cfg, item, tv_bundles, int(time.time()))
         freed += suspect
+        # verify_tv_imports also drops the marker for any "completed" grab that
+        # turns out incomplete on disk (a partial/dead grab that will never
+        # import) — folded into `freed` so those re-search this sweep too.
+        freed += await verify_tv_imports(cfg, state, item, int(time.time()))
         if freed:
             # Force this item due THIS sweep (the cadence gate below runs next):
             # a backed-off series must re-search the episodes we just freed now,
             # not wait out its back-off tier. Persist so it keeps draining.
             item["search_backlog"] = max(int(item.get("search_backlog") or 0), freed)
             await state.set_search_backlog(item_id, item["search_backlog"])
-        await verify_tv_imports(cfg, state, item, int(time.time()))
         in_queue_keys = _series_keys_in_queue(tv_bundles, title)
         # Still needed = wanted, minus what's already in the queue, minus what we
         # already have (completed markers / Sonarr hasFile). This is what we search

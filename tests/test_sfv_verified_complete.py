@@ -73,3 +73,46 @@ def test_extra_files_beyond_the_manifest_dont_matter(tmp_path):
     (tmp_path / "release.rar").write_bytes(b"x")
     (tmp_path / "release.nfo").write_bytes(b"x")  # not in the manifest, irrelevant
     assert _sfv_verified_complete(tmp_path) is True
+
+
+# ── _release_complete_on_disk (combines the .sfv check with a fallback) ─────
+from dcbridge.util import _release_complete_on_disk
+
+
+def test_on_disk_missing_folder_is_incomplete(tmp_path):
+    # parent (season dir) exists, the release folder does not
+    assert _release_complete_on_disk(tmp_path / "Release.S01E01-GRP") is False
+
+
+def test_on_disk_unreadable_parent_is_none(tmp_path):
+    assert _release_complete_on_disk(tmp_path / "no" / "such" / "Release-GRP") is None
+
+
+def test_on_disk_no_sfv_but_has_rar_first_volume_is_complete(tmp_path):
+    d = tmp_path / "Release-GRP"; d.mkdir()
+    (d / "x.r00").write_bytes(b"x")
+    (d / "x.rar").write_bytes(b"x")
+    assert _release_complete_on_disk(d) is True
+
+
+def test_on_disk_no_sfv_no_rar_first_volume_is_incomplete(tmp_path):
+    # the Reacher S04E02 shape: .rNN volumes but no .rar and no .sfv
+    d = tmp_path / "Release-GRP"; d.mkdir()
+    for i in range(11):
+        (d / f"x.r{i:02d}").write_bytes(b"x")
+    (d / "x.nfo").write_bytes(b"x")
+    assert _release_complete_on_disk(d) is False
+
+
+def test_on_disk_no_sfv_but_has_video_is_complete(tmp_path):
+    d = tmp_path / "Release-GRP"; d.mkdir()
+    (d / "x.mkv").write_bytes(b"x")
+    assert _release_complete_on_disk(d) is True
+
+
+def test_on_disk_failing_sfv_beats_a_present_rar(tmp_path):
+    d = tmp_path / "Release-GRP"; d.mkdir()
+    names = [f"x.r{i:02d}" for i in range(5)] + ["x.rar"]
+    (d / "x.sfv").write_text("".join(f"{n} DEADBEEF\n" for n in names), encoding="utf-8")
+    (d / "x.rar").write_bytes(b"x")   # only the last volume landed
+    assert _release_complete_on_disk(d) is False
