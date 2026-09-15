@@ -34,15 +34,19 @@ from dcbridge.arr import (
     _sync_radarr,
     _sync_sonarr,
     auto_approve_requests,
+    fetch_movie_item,
+    fetch_series_item,
     retry_failed_jellyseerr_requests,
 )
 from dcbridge.poller import (
     auto_sync_loop,
     handle_radarr_event,
     handle_sonarr_event,
+    list_release_candidates,
     poll_item,
     poller_loop,
     react_to_jellyseerr,
+    select_release,
     write_schedule_report,
 )
 from dcbridge.watcher import (
@@ -69,6 +73,13 @@ class RadarrWebhook(BaseModel):
 class RepairRequest(BaseModel):
     release_dir: str
     missing_files: list[str]
+
+
+class SelectReleaseRequest(BaseModel):
+    release_name: str
+    # Required for a TV item (identifies which episode this replaces);
+    # ignored for a movie, which has exactly one key ("movie").
+    episode_key: Optional[str] = None
 
 
 async def _handle_jellyseerr_failed(cfg: Config) -> None:
@@ -232,6 +243,63 @@ def make_app(cfg: Config) -> FastAPI:
             for r in results
         ]
         return {"instance": iid, "count": len(results), "results": preview}
+
+    async def _fetch_item_for_candidates(item_id: str) -> Optional[dict]:
+        """Always a FRESH item straight from Radarr/Sonarr — deliberately
+        bypasses tracked_items (state.get_item), which only carries items
+        dc-bridge's own sync considers still-outstanding (e.g.
+        resync_one_movie refuses anything with hasFile=true). "Check other
+        releases" is exactly for an item you ALREADY have, so that gate
+        would defeat the feature's whole point. See arr.fetch_movie_item /
+        fetch_series_item."""
+        kind, _, raw_id = item_id.partition(":")
+        if kind == "radarr":
+            return await fetch_movie_item(cfg, raw_id)
+        if kind == "sonarr":
+            return await fetch_series_item(cfg, raw_id)
+        return None
+
+    @app.get("/candidates/{item_id:path}")
+    async def list_candidates(item_id: str, episode: Optional[str] = None, wait: float = 8.0):
+        """Human-triggered only — media-audit's "Check other releases"
+        button. See poller.list_release_candidates. `episode` (an SxxExx
+        key) is required for a TV item, one episode at a time."""
+        item = await _fetch_item_for_candidates(item_id)
+        if not item:
+            raise HTTPException(404, f"no such {item_id!r} in Radarr/Sonarr (or *arr unreachable)")
+        kind = item["kind"]
+        if kind == "tv" and not episode:
+            raise HTTPException(400, "episode query param is required for a TV item")
+        key = episode if kind == "tv" else "movie"
+        ad: AirDCPP = app.state.airdcpp
+        await ad.ensure_auth()
+        candidates = await list_release_candidates(cfg, ad, item, key, wait=wait)
+        return {"item_id": item_id, "kind": kind, "key": key, "candidates": candidates}
+
+    @app.post("/candidates/{item_id:path}/select")
+    async def select_candidate(item_id: str, body: SelectReleaseRequest):
+        """Human-triggered only — queues one release NAMED by the caller
+        (from a prior /candidates listing) in place of whatever's at this
+        key now. media-audit deletes the old file/*arr record BEFORE
+        calling this — dc-bridge's own fin mount is read-only (see docker
+        run), it has no way to do that part itself. See
+        poller.select_release for what this endpoint's half actually
+        does."""
+        item = await _fetch_item_for_candidates(item_id)
+        if not item:
+            raise HTTPException(404, f"no such {item_id!r} in Radarr/Sonarr (or *arr unreachable)")
+        kind = item["kind"]
+        if kind == "tv" and not body.episode_key:
+            raise HTTPException(400, "episode_key is required for a TV item")
+        key = body.episode_key if kind == "tv" else "movie"
+        state: State = app.state.state
+        ad: AirDCPP = app.state.airdcpp
+        await ad.ensure_auth()
+        queued = await select_release(cfg, state, ad, item, key, body.release_name)
+        if queued is None:
+            raise HTTPException(404, f"{body.release_name!r} no longer available on the hub")
+        return {"ok": bool(queued), "item_id": item_id, "key": key,
+                "release_name": body.release_name, "queued": queued}
 
     @app.post("/repair")
     async def repair(body: RepairRequest):

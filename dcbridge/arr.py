@@ -563,6 +563,88 @@ async def resync_one_movie(cfg: Config, state: State, mid: str) -> bool:
     return True
 
 
+async def fetch_movie_item(cfg: Config, movie_id: str) -> Optional[dict]:
+    """A fresh, ephemeral item dict for ONE Radarr movie, in the shape
+    list_release_candidates/select_release expect — built straight from
+    Radarr, never touching tracked_items. Unlike resync_one_movie, this
+    works for ANY movie, including one that already hasFile (the whole
+    point of "check other releases" is browsing alternatives to something
+    you already have) and doesn't require `monitored` — a human explicitly
+    asking for this item is reason enough. Returns None if the movie
+    doesn't exist, or has no resolvable root folder."""
+    if not cfg.radarr.api_key or not movie_id.isdigit():
+        return None
+    url = cfg.radarr.url.rstrip("/")
+    h = {"X-Api-Key": cfg.radarr.api_key}
+    async with http_session() as http:
+        r = await http.get(f"{url}/api/v3/movie/{movie_id}", headers=h)
+        if r.status_code != 200:
+            log.warning("fetch_movie_item %s: GET movie -> %s", movie_id, r.status_code)
+            return None
+        m = r.json()
+        arr_root = m.get("rootFolderPath") or ""
+        if not arr_root:
+            fp = m.get("folderPath") or m.get("path") or ""
+            if fp:
+                arr_root = str(Path(fp).parent)
+        if not arr_root:
+            log.warning("fetch_movie_item %s (%s): no root/folder path", movie_id, m.get("title"))
+            return None
+        target_dir_fs = arr_to_fs(arr_root, cfg.path_translate)
+        profiles_by_id, profiles_by_name = await _fetch_quality_profiles(url, h, http)
+        named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "radarr")
+    return {
+        "id": f"radarr:{movie_id}", "kind": "movie", "title": m.get("title") or "?",
+        "year": m.get("year"), "target_dir_fs": target_dir_fs,
+        "quality_priority": named_priority if named_priority is not None
+        else (profiles_by_id.get(m.get("qualityProfileId")) or []),
+    }
+
+
+async def fetch_series_item(cfg: Config, series_id: str) -> Optional[dict]:
+    """Same as fetch_movie_item, for ONE Sonarr series — works regardless
+    of hasFile/monitored, since browsing alternatives for an episode you
+    already have is exactly the point. episode_air_years is populated so
+    match.tv_year_guard still applies to a hand-picked release the same as
+    an automatic one. Returns None if the series doesn't exist or has no
+    resolvable path."""
+    if not cfg.sonarr.api_key or not series_id.isdigit():
+        return None
+    url = cfg.sonarr.url.rstrip("/")
+    h = {"X-Api-Key": cfg.sonarr.api_key}
+    async with http_session() as http:
+        r = await http.get(f"{url}/api/v3/series/{series_id}", headers=h)
+        if r.status_code != 200:
+            log.warning("fetch_series_item %s: GET series -> %s", series_id, r.status_code)
+            return None
+        s = r.json()
+        arr_path = s.get("path") or ""
+        if not arr_path:
+            log.warning("fetch_series_item %s (%s): no path", series_id, s.get("title"))
+            return None
+        target_dir_fs = arr_to_fs(arr_path, cfg.path_translate)
+
+        episode_years: dict[str, int] = {}
+        rep = await http.get(f"{url}/api/v3/episode", params={"seriesId": series_id}, headers=h)
+        if rep.status_code == 200:
+            for ep in rep.json():
+                season, epnum = ep.get("seasonNumber"), ep.get("episodeNumber")
+                air = ep.get("airDateUtc")
+                if season is None or epnum is None or not air or not air[:4].isdigit():
+                    continue
+                episode_years[f"S{int(season):02d}E{int(epnum):02d}"] = int(air[:4])
+
+        profiles_by_id, profiles_by_name = await _fetch_quality_profiles(url, h, http)
+        named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "sonarr")
+    return {
+        "id": f"sonarr:{series_id}", "kind": "tv", "title": s.get("title") or "?",
+        "year": s.get("year"), "target_dir_fs": target_dir_fs,
+        "episode_air_years": episode_years,
+        "quality_priority": named_priority if named_priority is not None
+        else (profiles_by_id.get(s.get("qualityProfileId")) or []),
+    }
+
+
 async def _count_requested_episodes(
     base: str, h: dict, http: httpx.AsyncClient, tmdb_id, seasons: list,
 ) -> Optional[int]:

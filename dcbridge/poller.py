@@ -29,11 +29,13 @@ from dcbridge.helpers import (
     is_adult_release,
     is_disc_source_release,
     is_foreign_language,
+    is_repack,
     is_sd_release,
     loosen_hyphens_for_search,
     movie_title_prefix_ok,
     passes_quality,
     release_has_required_tag,
+    release_languages,
     release_matches_title,
     release_matches_year,
     release_starts_with_title,
@@ -1153,6 +1155,135 @@ def _scope_to_requested_seasons(keys: set[str], item: dict) -> set[str]:
         return keys
     want = set(seasons)
     return {k for k in keys if season_of_episode_key(k) in want}
+
+
+async def list_release_candidates(
+    cfg: Config, ad: AirDCPP, item: dict, key: str, wait: float = 8.0,
+) -> list[dict]:
+    """Human-triggered only (media-audit's "Check other releases" button,
+    via web.py's GET /candidates/{item}): one hub search, returning every
+    release that passes the SAME guards a normal poll applies
+    (_select_candidates — quality, adult, language, title, year, season),
+    scored the SAME way score_result would rank them for this item, sorted
+    best first. Queues nothing. `key` is "movie" for a movie, or one
+    SxxExx episode key for TV — a release is per-episode on the scene, so
+    "candidates for a whole series" wouldn't mean anything."""
+    kind = item["kind"]
+    title = item["title"]
+    title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
+    search_query = f"{title_query} {key}" if kind == "tv" else title_query
+
+    iid = await ad.create_search_instance()
+    if iid is None:
+        return []
+    try:
+        if not await ad.hub_search(iid, search_query, extensions=None):
+            return []
+        await asyncio.sleep(wait)
+        results = await ad.get_results(iid, 0, 500)
+    finally:
+        await ad.delete_instance(iid)
+
+    item_priority = item.get("quality_priority") or []
+    lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
+    candidates_by_key = _select_candidates(
+        results, kind, title, item, cfg, item_priority, {key}, item["id"],
+    )
+    out = [
+        {
+            "release_name": g["release_name"],
+            "size_bytes": g["total_size"],
+            "score": score_result(g["release_name"], g["total_size"], cfg.quality, item_priority, lang_priority),
+            "languages": sorted(release_languages(g["release_name"])),
+            "is_repack": is_repack(g["release_name"]),
+            "whole_folder": bool(g.get("dir_id")),
+        }
+        for g in candidates_by_key.get(key, [])
+    ]
+    out.sort(key=lambda c: c["score"], reverse=True)
+    log.info("candidates %s key=%s: %d hub result(s) -> %d passing candidate(s)",
+             item["id"], key, len(results), len(out))
+    return out
+
+
+async def select_release(
+    cfg: Config, state: State, ad: AirDCPP, item: dict, key: str, release_name: str,
+) -> Optional[int]:
+    """Human-triggered only (POST /candidates/{item}/select) — queues one
+    release NAMED by the caller (from a prior list_release_candidates
+    call) in place of whatever's at this key now. media-audit deletes the
+    old file/*arr record BEFORE calling this — dc-bridge's own fin mount
+    is read-only (see docker run), so it has no way to do that part
+    itself. This function is purely dc-bridge's own side of a "replace":
+
+      1. Drop the completed marker for this key (movie: "movie"; TV: the
+         episode key) so it's not treated as already-satisfied.
+      2. Remove any AirDC++ bundle still occupying this key — a stale one
+         left over from the old grab, or a same-named one a user queued —
+         so the fresh queue below doesn't collide or get skipped as
+         already-in-queue.
+      3. Re-run the search + the SAME guards a normal poll applies
+         (_select_candidates) and confirm `release_name` is still among
+         the results — a human picked it from a listing that may be
+         seconds or minutes old; queueing an unvalidated name from the
+         caller outright would bypass every quality/adult/title/year
+         guard this bridge otherwise always enforces.
+      4. Queue it via the existing _queue_candidates (identical to what a
+         normal poll would do once it had picked this as the winner).
+
+    Returns the number queued (0 or 1), or None if `release_name` is no
+    longer on the hub on this fresh search — the caller (web.py) turns
+    that into a 404 rather than silently queueing something else."""
+    kind = item["kind"]
+    title = item["title"]
+    item_id = item["id"]
+
+    await state.clear_completed(item_id, key)
+    bundles = await ad.list_bundles() or []
+    for b in bundles:
+        name = b.get("name") or ""
+        if kind == "movie":
+            occupies_key = release_matches_title(name, title, anchored=True) \
+                and release_matches_year(name, item.get("year"))
+        else:
+            occupies_key = release_matches_title(name, title, anchored=True) \
+                and key in episode_keys_from_name(name)
+        if occupies_key and b.get("id") is not None:
+            await ad.remove_bundle(b["id"], remove_finished=False)
+            log.warning("select %s: removed stale bundle %r occupying %s", item_id, name, key)
+
+    item_priority = item.get("quality_priority") or []
+    lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
+    target_base_smb = _to_smb_dir(item["target_dir_fs"], cfg.path_map)
+    title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
+    search_query = f"{title_query} {key}" if kind == "tv" else title_query
+
+    iid = await ad.create_search_instance()
+    if iid is None:
+        return None
+    try:
+        if not await ad.hub_search(iid, search_query, extensions=None):
+            return None
+        await asyncio.sleep(8.0)
+        results = await ad.get_results(iid, 0, 500)
+        candidates_by_key = _select_candidates(
+            results, kind, title, item, cfg, item_priority, {key}, item_id,
+        )
+        chosen = [g for g in candidates_by_key.get(key, []) if g["release_name"] == release_name]
+        if not chosen:
+            return None
+        queued = await _queue_candidates(
+            ad, state, cfg, iid, kind, item_id,
+            {key: chosen}, set(), target_base_smb, item_priority, lang_priority,
+        )
+    finally:
+        try:
+            await ad.delete_instance(iid)
+        except Exception:
+            log.debug("delete_instance %s failed (ignored)", iid)
+
+    log.warning("select %s: queued=%s release=%r key=%s", item_id, bool(queued), release_name, key)
+    return queued
 
 
 _ITEM_POLL_LOCKS: dict[str, asyncio.Lock] = {}
