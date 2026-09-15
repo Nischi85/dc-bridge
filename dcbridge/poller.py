@@ -1157,6 +1157,47 @@ def _scope_to_requested_seasons(keys: set[str], item: dict) -> set[str]:
     return {k for k in keys if season_of_episode_key(k) in want}
 
 
+# "Check other releases" candidate cache — one browse-then-pick session per
+# (item, key). Its whole purpose is letting select_release skip a second
+# hub search: AirDC++ keeps a search instance (and its results, addressable
+# by tth for a download call) alive server-side for a while on its own
+# (~30 min, observed) regardless of whether we hang onto it — so NOT
+# calling delete_instance right after listing means a same-session "Use
+# this" click can queue straight from the instance the listing already
+# made, with no re-search. Kept under this TTL to stay safely inside
+# AirDC++'s own expiry; select_release re-searches (the old, always-correct
+# behavior) as a fallback whenever the cache has nothing usable — expired,
+# evicted, or dc-bridge restarted since. A private hub can flag/kick a
+# client for searching too often, so avoiding a redundant search here
+# matters, not just latency.
+_CANDIDATE_CACHE_TTL_SECONDS = 25 * 60
+_CANDIDATE_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _candidate_cache_key(item_id: str, key: str) -> str:
+    return f"{item_id}:{key}"
+
+
+def _purge_expired_candidate_cache_entries() -> list[dict]:
+    """Drop (and return, for the caller to delete_instance) every cache
+    entry past its TTL — opportunistic, called from both entry points so
+    no separate background task is needed. AirDC++ would expire the
+    instance itself either way; this just stops dc-bridge's own dict
+    growing unbounded across many browsed-but-never-picked items."""
+    now = time.time()
+    expired = [k for k, v in _CANDIDATE_CACHE.items() if now - v["created_at"] > _CANDIDATE_CACHE_TTL_SECONDS]
+    return [_CANDIDATE_CACHE.pop(k) for k in expired]
+
+
+async def _evict_candidate_cache(ad: AirDCPP, cache_key: str) -> None:
+    entry = _CANDIDATE_CACHE.pop(cache_key, None)
+    if entry is not None:
+        try:
+            await ad.delete_instance(entry["iid"])
+        except Exception:
+            log.debug("delete_instance %s failed during cache evict (ignored)", entry["iid"])
+
+
 async def list_release_candidates(
     cfg: Config, ad: AirDCPP, item: dict, key: str, wait: float = 8.0,
 ) -> list[dict]:
@@ -1167,28 +1208,51 @@ async def list_release_candidates(
     scored the SAME way score_result would rank them for this item, sorted
     best first. Queues nothing. `key` is "movie" for a movie, or one
     SxxExx episode key for TV — a release is per-episode on the scene, so
-    "candidates for a whole series" wouldn't mean anything."""
+    "candidates for a whole series" wouldn't mean anything.
+
+    Leaves the search instance OPEN and caches it (see _CANDIDATE_CACHE)
+    so a same-session select_release can queue without searching again —
+    only deleted here if nothing passed the guards (nothing worth keeping
+    alive) or a stale entry for this exact (item, key) already existed
+    (a fresh browse supersedes an old uncommitted one)."""
+    item_id = item["id"]
     kind = item["kind"]
     title = item["title"]
+    cache_key = _candidate_cache_key(item_id, key)
+
+    for stale in _purge_expired_candidate_cache_entries():
+        try:
+            await ad.delete_instance(stale["iid"])
+        except Exception:
+            log.debug("delete_instance %s failed during TTL purge (ignored)", stale["iid"])
+    await _evict_candidate_cache(ad, cache_key)
+
     title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
     search_query = f"{title_query} {key}" if kind == "tv" else title_query
 
     iid = await ad.create_search_instance()
     if iid is None:
         return []
-    try:
-        if not await ad.hub_search(iid, search_query, extensions=None):
-            return []
-        await asyncio.sleep(wait)
-        results = await ad.get_results(iid, 0, 500)
-    finally:
+    if not await ad.hub_search(iid, search_query, extensions=None):
         await ad.delete_instance(iid)
+        return []
+    await asyncio.sleep(wait)
+    results = await ad.get_results(iid, 0, 500)
 
     item_priority = item.get("quality_priority") or []
     lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
     candidates_by_key = _select_candidates(
-        results, kind, title, item, cfg, item_priority, {key}, item["id"],
+        results, kind, title, item, cfg, item_priority, {key}, item_id,
     )
+    groups = candidates_by_key.get(key, [])
+    if not groups:
+        await ad.delete_instance(iid)
+        log.info("candidates %s key=%s: %d hub result(s) -> 0 passing candidate(s)", item_id, key, len(results))
+        return []
+
+    _CANDIDATE_CACHE[cache_key] = {
+        "iid": iid, "by_name": {g["release_name"]: g for g in groups}, "created_at": time.time(),
+    }
     out = [
         {
             "release_name": g["release_name"],
@@ -1198,11 +1262,11 @@ async def list_release_candidates(
             "is_repack": is_repack(g["release_name"]),
             "whole_folder": bool(g.get("dir_id")),
         }
-        for g in candidates_by_key.get(key, [])
+        for g in groups
     ]
     out.sort(key=lambda c: c["score"], reverse=True)
     log.info("candidates %s key=%s: %d hub result(s) -> %d passing candidate(s)",
-             item["id"], key, len(results), len(out))
+             item_id, key, len(results), len(out))
     return out
 
 
@@ -1220,23 +1284,27 @@ async def select_release(
          episode key) so it's not treated as already-satisfied.
       2. Remove any AirDC++ bundle still occupying this key — a stale one
          left over from the old grab, or a same-named one a user queued —
-         so the fresh queue below doesn't collide or get skipped as
+         so the queue below doesn't collide or get skipped as
          already-in-queue.
-      3. Re-run the search + the SAME guards a normal poll applies
-         (_select_candidates) and confirm `release_name` is still among
-         the results — a human picked it from a listing that may be
-         seconds or minutes old; queueing an unvalidated name from the
-         caller outright would bypass every quality/adult/title/year
-         guard this bridge otherwise always enforces.
+      3. Queue `release_name`, either straight from the still-open
+         instance the matching list_release_candidates call cached (no
+         second hub search — see _CANDIDATE_CACHE), or, if that's gone
+         (expired past _CANDIDATE_CACHE_TTL_SECONDS, evicted by a newer
+         browse, or dc-bridge restarted since), by re-running the search +
+         the SAME guards a normal poll applies (_select_candidates) and
+         confirming `release_name` is still among the results — a human's
+         pick is never queued unvalidated, whichever path is taken.
       4. Queue it via the existing _queue_candidates (identical to what a
          normal poll would do once it had picked this as the winner).
 
-    Returns the number queued (0 or 1), or None if `release_name` is no
-    longer on the hub on this fresh search — the caller (web.py) turns
-    that into a 404 rather than silently queueing something else."""
+    Returns the number queued (0 or 1), or None if `release_name` isn't
+    resolvable at all (cache miss AND gone from a fresh search) — the
+    caller (web.py) turns that into a 404 rather than silently queueing
+    something else."""
     kind = item["kind"]
     title = item["title"]
     item_id = item["id"]
+    cache_key = _candidate_cache_key(item_id, key)
 
     await state.clear_completed(item_id, key)
     bundles = await ad.list_bundles() or []
@@ -1255,6 +1323,31 @@ async def select_release(
     item_priority = item.get("quality_priority") or []
     lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
     target_base_smb = _to_smb_dir(item["target_dir_fs"], cfg.path_map)
+
+    cached = _CANDIDATE_CACHE.get(cache_key)
+    if cached is not None and time.time() - cached["created_at"] <= _CANDIDATE_CACHE_TTL_SECONDS \
+            and release_name in cached["by_name"]:
+        iid = cached["iid"]
+        chosen = [cached["by_name"][release_name]]
+        try:
+            queued = await _queue_candidates(
+                ad, state, cfg, iid, kind, item_id,
+                {key: chosen}, set(), target_base_smb, item_priority, lang_priority,
+            )
+        finally:
+            _CANDIDATE_CACHE.pop(cache_key, None)
+            try:
+                await ad.delete_instance(iid)
+            except Exception:
+                log.debug("delete_instance %s failed (ignored)", iid)
+        log.warning("select %s: queued=%s release=%r key=%s (from the cached listing, no re-search)",
+                    item_id, bool(queued), release_name, key)
+        return queued
+
+    # Cache miss — the listing expired, was superseded, or this dc-bridge
+    # process restarted since. Fall back to the original always-correct
+    # path: search again and re-validate before queueing.
+    _CANDIDATE_CACHE.pop(cache_key, None)
     title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
     search_query = f"{title_query} {key}" if kind == "tv" else title_query
 
@@ -1282,7 +1375,8 @@ async def select_release(
         except Exception:
             log.debug("delete_instance %s failed (ignored)", iid)
 
-    log.warning("select %s: queued=%s release=%r key=%s", item_id, bool(queued), release_name, key)
+    log.warning("select %s: queued=%s release=%r key=%s (cache miss, re-searched)",
+                item_id, bool(queued), release_name, key)
     return queued
 
 

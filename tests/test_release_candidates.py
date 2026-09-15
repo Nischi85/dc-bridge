@@ -6,10 +6,22 @@ network or sqlite involved.
 """
 import asyncio
 
+import pytest
+
 import dcbridge.poller as poller
 from dcbridge.config import (
     AirDCPPCfg, ArrCfg, Config, LanguageRule, PathMap, QualityCfg,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_candidate_cache():
+    # _CANDIDATE_CACHE is module-level (deliberately — see its own comment:
+    # it's what lets select_release skip a second hub search within one
+    # browse-then-pick session). Isolate tests from each other regardless.
+    poller._CANDIDATE_CACHE.clear()
+    yield
+    poller._CANDIDATE_CACHE.clear()
 
 
 def _cfg(*, priority=None, language_priority=None) -> Config:
@@ -121,7 +133,13 @@ def test_lists_every_passing_release_scored_and_sorted(monkeypatch):
     assert out[0]["languages"] == ["swedish"]
     assert out[1]["languages"] == ["english"]
     assert all(c["whole_folder"] for c in out)
-    assert ad.instances_deleted  # the listing instance was cleaned up
+    # A successful listing keeps its instance OPEN (cached for select_release
+    # to reuse — see _CANDIDATE_CACHE) rather than deleting it immediately.
+    assert ad.instances_deleted == []
+    cached = poller._CANDIDATE_CACHE["radarr:1:movie"]
+    assert set(cached["by_name"]) == {
+        "Some.Movie.2020.1080p.BluRay.x264-GROUP", "Some.Movie.2020.NORDIC.1080p.BluRay.x264-GROUP2",
+    }
 
 
 def test_rejects_a_release_that_fails_the_normal_guards(monkeypatch):
@@ -130,6 +148,9 @@ def test_rejects_a_release_that_fails_the_normal_guards(monkeypatch):
     ad = FakeAd(results)
     out = asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
     assert out == []
+    # Nothing worth keeping alive — the instance is cleaned up right away.
+    assert ad.instances_deleted == [1]
+    assert poller._CANDIDATE_CACHE == {}
 
 
 def test_tv_uses_the_episode_key_in_the_search_query(monkeypatch):
@@ -152,6 +173,32 @@ def test_empty_hub_search_returns_no_candidates(monkeypatch):
     ad.hub_search = fake_hub_search
     out = asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
     assert out == []
+    assert ad.instances_deleted == [1]
+
+
+def test_a_second_listing_for_the_same_item_and_key_evicts_the_first_instance(monkeypatch):
+    results = [_dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1")]
+    ad = FakeAd(results)
+    asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    first_iid = poller._CANDIDATE_CACHE["radarr:1:movie"]["iid"]
+    asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    assert first_iid in ad.instances_deleted
+    assert poller._CANDIDATE_CACHE["radarr:1:movie"]["iid"] != first_iid
+
+
+def test_listing_purges_other_expired_cache_entries(monkeypatch):
+    ad = FakeAd([])
+    poller._CANDIDATE_CACHE["sonarr:9:S01E01"] = {
+        "iid": 777, "by_name": {}, "created_at": 0.0,  # ancient -> expired
+    }
+
+    async def fake_hub_search(iid, query, extensions=None):
+        return False
+
+    ad.hub_search = fake_hub_search
+    asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    assert 777 in ad.instances_deleted
+    assert "sonarr:9:S01E01" not in poller._CANDIDATE_CACHE
 
 
 # ── select_release ────────────────────────────────────────────────────────
@@ -216,3 +263,60 @@ def test_select_tv_matches_bundles_by_episode_key(monkeypatch):
     assert queued == 1
     assert ad.removed_bundle_ids == [(5, False)]
     assert state.cleared == [("sonarr:9", "S01E02")]
+
+
+# ── select_release: cache-hit fast path (no second hub search) ─────────────
+
+def test_select_after_a_listing_reuses_its_instance_with_no_second_search(monkeypatch):
+    results = [
+        _dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1"),
+        _dir_result("Some.Movie.2020.720p.WEB.x264-OTHER", "/Movies/Some.Movie.2020.720p.WEB.x264-OTHER/", 3000, "d2"),
+    ]
+    ad = FakeAd(results)
+    state = FakeState()
+
+    listed = asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    assert len(listed) == 2
+    assert len(ad.hub_searches) == 1
+    cached_iid = poller._CANDIDATE_CACHE["radarr:1:movie"]["iid"]
+
+    queued = asyncio.run(poller.select_release(
+        _cfg(), state, ad, _movie_item(), "movie", "Some.Movie.2020.1080p.BluRay.x264-GOOD",
+    ))
+
+    assert queued == 1
+    assert len(ad.hub_searches) == 1  # still just the one — select did NOT re-search
+    assert ad.queued == [("d1", "Z:\\Movies\\")]
+    assert ad.instances_deleted == [cached_iid]  # cleaned up once spent
+    assert "radarr:1:movie" not in poller._CANDIDATE_CACHE
+
+
+def test_select_falls_back_to_a_fresh_search_when_the_cache_entry_is_for_a_different_release(monkeypatch):
+    # The listing found it, but the cache only has THAT exact name — asking
+    # for something not in it (e.g. stale UI state) must still work via the
+    # fallback path, not silently fail.
+    results = [_dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1")]
+    ad = FakeAd(results)
+    state = FakeState()
+    asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    assert len(ad.hub_searches) == 1
+
+    queued = asyncio.run(poller.select_release(
+        _cfg(), state, ad, _movie_item(), "movie", "Some.Movie.2020.720p.WEB.x264-NOT-LISTED",
+    ))
+    assert queued is None  # not on the (re-searched) hub either
+    assert len(ad.hub_searches) == 2  # fell back to a real second search
+
+
+def test_select_falls_back_when_the_cached_entry_has_expired(monkeypatch):
+    results = [_dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1")]
+    ad = FakeAd(results)
+    state = FakeState()
+    asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    poller._CANDIDATE_CACHE["radarr:1:movie"]["created_at"] -= poller._CANDIDATE_CACHE_TTL_SECONDS + 1
+
+    queued = asyncio.run(poller.select_release(
+        _cfg(), state, ad, _movie_item(), "movie", "Some.Movie.2020.1080p.BluRay.x264-GOOD",
+    ))
+    assert queued == 1
+    assert len(ad.hub_searches) == 2  # cache was too old to trust — re-searched
