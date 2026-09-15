@@ -136,8 +136,10 @@ poller:
   # Content-age back-off. Older CONTENT is searched less often, where age is
   # measured from when the title became available — a movie's release date, or a
   # series' newest still-wanted aired episode — NOT when it was requested. So a
-  # freshly-requested 3-year-old movie backs off immediately, while a brand-new
-  # release keeps searching every sweep. The poller picks the LAST tier whose
+  # freshly-requested old movie is subject to the SAME tier a long-tracked one
+  # its age would be in (see miss_backoff_escalate_after below for why that
+  # doesn't mean immediately, though), while a brand-new release keeps
+  # searching every sweep. The poller picks the LAST tier whose
   # `older_than_days` matches; content younger than every tier searches every
   # sweep. An empty list disables back-off. Order tiers small -> large age.
   backoff:
@@ -149,6 +151,18 @@ poller:
       search_every_seconds: 345600
     - older_than_days: 90        # 90+ d old: once per week
       search_every_seconds: 604800
+  # The content-age tier above is picked from how OLD the content is, not how
+  # many searches have actually come up empty — so on its own, a freshly-
+  # requested OLD title (e.g. a 2007 movie) could drop straight into the
+  # harshest tier (once a week, above) after just ONE search that happened to
+  # find nothing, even though a scene hub's availability genuinely fluctuates
+  # poll to poll. Until an item has racked up this many CONSECUTIVE real
+  # searches that queued nothing, its gap is capped at the GENTLEST configured
+  # tier instead (once a day, above) regardless of content age — a few real
+  # chances close together before conceding it's actually hard to find. Resets
+  # to 0 the moment anything queues. 0 disables (apply the content-age tier
+  # immediately, the old behavior).
+  miss_backoff_escalate_after: 3
 
 # Background re-sync from Jellyseerr/sonarr/radarr so newly-requested items pick
 # up an active request_status without you having to POST /sync manually. Set to

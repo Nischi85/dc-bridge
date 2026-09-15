@@ -23,7 +23,8 @@ NOW = 1_800_000_000  # arbitrary fixed reference epoch
 
 
 def _cfg(*, backoff=None, movie_release_offset_days=0.0,
-          fresh_episode_hours=48.0, fresh_episode_every_seconds=7200) -> Config:
+          fresh_episode_hours=48.0, fresh_episode_every_seconds=7200,
+          miss_backoff_escalate_after=3) -> Config:
     return Config(
         airdcpp=AirDCPPCfg(url="http://x", username="u", password="p"),
         sonarr=ArrCfg(url="http://sonarr"),
@@ -34,6 +35,7 @@ def _cfg(*, backoff=None, movie_release_offset_days=0.0,
             backoff=backoff or [],
             fresh_episode_hours=fresh_episode_hours,
             fresh_episode_every_seconds=fresh_episode_every_seconds,
+            miss_backoff_escalate_after=miss_backoff_escalate_after,
         ),
         match=MatchCfg(movie_release_offset_days=movie_release_offset_days),
     )
@@ -41,14 +43,16 @@ def _cfg(*, backoff=None, movie_release_offset_days=0.0,
 
 def _tv_item(**overrides) -> dict:
     base = {"kind": "tv", "last_searched_at": 0, "request_created_at": 0,
-            "search_backlog": 0, "air_anchor_utc": None, "next_air_utc": None}
+            "search_backlog": 0, "air_anchor_utc": None, "next_air_utc": None,
+            "search_misses": 0}
     base.update(overrides)
     return base
 
 
 def _movie_item(**overrides) -> dict:
     base = {"kind": "movie", "last_searched_at": 0, "request_created_at": 0,
-            "search_backlog": 0, "release_date_utc": None, "year": None}
+            "search_backlog": 0, "release_date_utc": None, "year": None,
+            "search_misses": 0}
     base.update(overrides)
     return base
 
@@ -124,6 +128,16 @@ def test_movie_due_once_release_plus_offset_has_passed():
     assert d["due"] is True
 
 
+def test_movie_miss_count_caps_the_gap_regardless_of_content_age():
+    # The exact real-world case: a 2026-09-14 fresh Harry Potter and the Order
+    # of the Phoenix (2007) request, one empty search.
+    item = _movie_item(release_date_utc=_utc_iso(NOW - 200 * 86400),
+                        last_searched_at=NOW - 2 * 86400,
+                        request_created_at=NOW - 300 * 86400, search_misses=0)
+    d = compute_cadence(item, _cfg(backoff=_tiers()), NOW)
+    assert d["due"] is True and d["status"] == "due"
+
+
 # ── backlog draining overrides everything ────────────────────────────────────
 
 
@@ -173,12 +187,52 @@ def test_backoff_due_once_the_tier_gap_has_elapsed():
     assert d["due"] is True and d["status"] == "due"
 
 
-def test_older_content_gets_the_wider_tier_gap():
+def test_older_content_gets_the_wider_tier_gap_once_escalated():
+    # search_misses has reached miss_backoff_escalate_after (default 3) — the
+    # item has genuinely proven hard to find, so the full content-age tier
+    # (not just the gentlest one) now applies. See the un-escalated case in
+    # test_a_fresh_miss_count_caps_the_gap_regardless_of_content_age below.
     very_old_air = NOW - 200 * 86400  # -> the 90-day tier (7-day gap)
     item = _tv_item(air_anchor_utc=_utc_iso(very_old_air), last_searched_at=NOW - 2 * 86400,
-                     request_created_at=NOW - 300 * 86400)
+                     request_created_at=NOW - 300 * 86400, search_misses=3)
     d = compute_cadence(item, _cfg(backoff=_tiers()), NOW)
     # Only 2 days since last search but the wide tier needs 7 -> still backed off.
+    assert d["due"] is False
+    assert d["next_due"] == item["last_searched_at"] + 7 * 86400
+
+
+def test_a_fresh_miss_count_caps_the_gap_regardless_of_content_age():
+    # The real-world bug this guards: Harry Potter and the Order of the
+    # Phoenix (2007) was freshly requested, searched once, found nothing that
+    # sweep, and (pre-fix) dropped straight into the 90-day tier's 7-day gap
+    # — even though a re-search minutes later found hundreds of hits. With
+    # search_misses still below the escalation threshold, the gap must stay
+    # capped at the GENTLEST configured tier no matter how old the content is.
+    very_old_air = NOW - 200 * 86400  # -> would otherwise pick the 90-day tier
+    item = _tv_item(air_anchor_utc=_utc_iso(very_old_air), last_searched_at=NOW - 2 * 86400,
+                     request_created_at=NOW - 300 * 86400, search_misses=0)
+    d = compute_cadence(item, _cfg(backoff=_tiers()), NOW)
+    # 2 days since last search >= the capped 1-day (gentlest tier) gap -> due,
+    # NOT held back for the full 7 days the raw content age would imply.
+    assert d["due"] is True and d["status"] == "due"
+
+
+def test_miss_count_below_threshold_still_caps_the_gap():
+    very_old_air = NOW - 200 * 86400
+    item = _tv_item(air_anchor_utc=_utc_iso(very_old_air), last_searched_at=NOW - 3600,
+                     request_created_at=NOW - 300 * 86400, search_misses=2)
+    d = compute_cadence(item, _cfg(backoff=_tiers(), miss_backoff_escalate_after=3), NOW)
+    # 1h since last search < the capped 1-day gap -> still backed off, but by
+    # the GENTLE tier's gap, not the 7-day one.
+    assert d["due"] is False
+    assert d["next_due"] == item["last_searched_at"] + 86400
+
+
+def test_miss_escalation_disabled_applies_the_content_age_tier_immediately():
+    very_old_air = NOW - 200 * 86400
+    item = _tv_item(air_anchor_utc=_utc_iso(very_old_air), last_searched_at=NOW - 2 * 86400,
+                     request_created_at=NOW - 300 * 86400, search_misses=0)
+    d = compute_cadence(item, _cfg(backoff=_tiers(), miss_backoff_escalate_after=0), NOW)
     assert d["due"] is False
     assert d["next_due"] == item["last_searched_at"] + 7 * 86400
 

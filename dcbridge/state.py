@@ -71,6 +71,7 @@ class State:
             ("episode_air_years",   "ALTER TABLE tracked_items ADD COLUMN episode_air_years TEXT"),
             ("last_synced_at",      "ALTER TABLE tracked_items ADD COLUMN last_synced_at INTEGER"),
             ("drain_misses",        "ALTER TABLE tracked_items ADD COLUMN drain_misses INTEGER"),
+            ("search_misses",       "ALTER TABLE tracked_items ADD COLUMN search_misses INTEGER"),
         ]:
             if name not in cols:
                 self.conn.execute(ddl)
@@ -120,7 +121,7 @@ class State:
         " request_created_at, last_searched_at, year, air_anchor_utc, next_air_utc,"
         " jellyseerr_media_id, quality_priority, release_date_utc, search_backlog,"
         " requested_seasons, alt_titles, episode_air_years, last_synced_at,"
-        " drain_misses"
+        " drain_misses, search_misses"
     )
 
     @staticmethod
@@ -146,6 +147,7 @@ class State:
             "episode_air_years": json.loads(r[17]) if r[17] else {},
             "last_synced_at": r[18],
             "drain_misses": r[19] or 0,
+            "search_misses": r[20] or 0,
         }
 
     async def list_items(self) -> list[dict]:
@@ -233,6 +235,21 @@ class State:
             self._update_if_changed(
                 "UPDATE tracked_items SET drain_misses = ?"
                 " WHERE id = ? AND drain_misses IS NOT ?",
+                (int(n), item_id, int(n)),
+            )
+
+    async def set_search_misses(self, item_id: str, n: int) -> None:
+        """Consecutive real search round-trips (any kind, any schedule status)
+        that found nothing to queue. compute_cadence keeps this below
+        poller.miss_backoff_escalate_after to the gentlest configured tier
+        regardless of content age — a freshly-requested OLD title's first
+        miss (a scene hub's availability genuinely fluctuates poll to poll)
+        must not fall straight into a week-long silence. Reset to 0 the
+        moment a poll queues anything for this item."""
+        async with self._lock:
+            self._update_if_changed(
+                "UPDATE tracked_items SET search_misses = ?"
+                " WHERE id = ? AND search_misses IS NOT ?",
                 (int(n), item_id, int(n)),
             )
 

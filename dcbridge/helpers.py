@@ -731,10 +731,20 @@ def compute_cadence(item: dict, cfg: "Config", now_ts: int) -> dict:
     gap = None
     ref = movie_ref or _content_ref_epoch(item) or int(item.get("request_created_at") or 0)
     if ref and cfg.poller.backoff:
-        age = now_ts - ref
-        applicable = [t for t in cfg.poller.backoff if age >= t.older_than_days * 86400]
-        if applicable:
-            gap = max(applicable, key=lambda t: t.older_than_days).search_every_seconds
+        escalate_after = cfg.poller.miss_backoff_escalate_after
+        misses = int(item.get("search_misses") or 0)
+        if escalate_after > 0 and misses < escalate_after:
+            # Not yet proven hard to find — cap the gap at the gentlest
+            # configured tier regardless of content age (see
+            # miss_backoff_escalate_after's own comment in config.py). Once
+            # search_misses reaches the threshold, fall through to the normal
+            # content-age tier below — it really does seem hard to find by then.
+            gap = min(t.search_every_seconds for t in cfg.poller.backoff)
+        else:
+            age = now_ts - ref
+            applicable = [t for t in cfg.poller.backoff if age >= t.older_than_days * 86400]
+            if applicable:
+                gap = max(applicable, key=lambda t: t.older_than_days).search_every_seconds
 
     # Fresh-episode override: a TV episode that aired within fresh_episode_hours is
     # searched at (at most) the fresh cadence — capping, never slowing, the

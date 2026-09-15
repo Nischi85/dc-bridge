@@ -1810,6 +1810,13 @@ async def _poll_item(
         # instead of being re-queued every sweep.
         if kind == "tv":
             await trigger_arr_rescan(cfg, item_id)
+        await state.set_search_misses(item_id, 0)
+    else:
+        # A real search round-trip that queued nothing — see
+        # compute_cadence/miss_backoff_escalate_after: this keeps a
+        # freshly-requested old title from dropping straight into the
+        # harshest content-age back-off tier after just one empty search.
+        await state.set_search_misses(item_id, int(item.get("search_misses") or 0) + 1)
 
     # We issued an AirDC++ search round-trip for this item; the poller uses this
     # to spend its inter-search jitter only on real searches.

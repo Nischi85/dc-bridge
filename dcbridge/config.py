@@ -135,6 +135,20 @@ class PollerCfg(BaseModel):
     # release sometimes follows instead) before conceding the sweep. 0 disables.
     alt_title_search_limit: int = 3
     backoff: list[BackoffTier] = Field(default_factory=list)
+    # Content-age back-off (above) picks a tier from how OLD the content is, not
+    # how many times a search has actually come up empty — so a freshly-
+    # requested old title (e.g. a 2007 movie) can drop straight into the
+    # harshest tier (backoff's longest gap, e.g. once a week) after just ONE
+    # search that happened to find nothing, even though a scene hub's
+    # availability genuinely fluctuates poll to poll and the very next search
+    # might find hundreds of hits. Until an item has racked up this many
+    # CONSECUTIVE real searches that queued nothing (tracked_items.
+    # search_misses, reset the moment anything queues), compute_cadence caps
+    # its gap at the gentlest configured backoff tier regardless of content
+    # age — giving it a few real chances close together before conceding it's
+    # actually hard to find. 0 disables (apply the content-age tier immediately,
+    # the old behavior).
+    miss_backoff_escalate_after: int = 3
     # When False (default), an episode/movie that was once fulfilled is NOT
     # re-downloaded if its file is later deleted — the completion marker keeps it
     # out of the search set. Set True for *arr-style behaviour: always re-grab a
