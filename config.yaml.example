@@ -204,6 +204,12 @@ alerting:
   check_interval_seconds: 600
   alert_file: /mnt/cache/dc-bridge/pending_alerts.json
   rargate_status_file: ""
+  # rargate adds a release to its stuck_releases list the moment SFV
+  # validation has failed 3 times — as little as ~20s into a large, healthy
+  # in-progress download (real false alarm, 2026-09-14: two Harry Potter
+  # releases mid-transfer both tripped it within 20-30s). Only a release
+  # stuck at least this long counts toward the alert.
+  rargate_stuck_min_minutes: 30
 
 # Route children's content to dedicated *arr root folders by genre. A movie/series
 # carrying any listed genre is relocated (metadata move, moveFiles=false — files are

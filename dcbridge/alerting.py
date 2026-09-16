@@ -30,15 +30,29 @@ from dcbridge.config import Config
 from dcbridge.state import State
 
 
-def _read_rargate_stuck_count(status_file: str) -> Optional[int]:
-    """stuck_releases_count from rargate's status JSON. None (not 0) when the
-    file is missing/unreadable/not configured — "unknown", never "all clear",
-    so a rargate outage can't silently mask a real problem."""
+def _read_rargate_stuck_count(status_file: str, min_stuck_seconds: float = 0.0) -> Optional[int]:
+    """Releases in rargate's status JSON stuck for at least min_stuck_seconds
+    — NOT the raw stuck_releases_count, which rargate increments the moment
+    a release fails SFV validation 3 times (as little as ~20s into a large,
+    perfectly healthy in-progress download — real case, 2026-09-14: two
+    Harry Potter releases mid-transfer both tripped it within 20-30s while
+    downloading completely normally). Filtering by each entry's own
+    stuck_seconds means the alert only fires for a release that's ACTUALLY
+    been sitting broken a while, not every big download's first few
+    seconds; min_stuck_seconds=0 (the default) keeps the old raw-count
+    behavior for any caller that wants it. None (not 0) when the file is
+    missing/unreadable/not configured — "unknown", never "all clear", so a
+    rargate outage can't silently mask a real problem."""
     if not status_file:
         return None
     try:
         data = json.loads(Path(status_file).read_text())
-        return int(data.get("stuck_releases_count", 0))
+        releases = data.get("stuck_releases")
+        if releases is None:
+            # Older/unexpected shape with no per-release list — fall back to
+            # the raw count so this doesn't silently go blind on that field.
+            return int(data.get("stuck_releases_count", 0))
+        return sum(1 for r in releases if float(r.get("stuck_seconds") or 0) >= min_stuck_seconds)
     except Exception as e:
         log.debug("alerting: could not read rargate status file %s: %s", status_file, e)
         return None
@@ -99,7 +113,9 @@ async def alert_loop(app) -> None:
             )
             stale_threshold_ts = now_ts - max(2 * cfg.auto_sync.interval_seconds, 1800)
             stale = await state.stale_active_items(stale_threshold_ts, active_statuses)
-            rargate_stuck = _read_rargate_stuck_count(ac.rargate_status_file)
+            rargate_stuck = _read_rargate_stuck_count(
+                ac.rargate_status_file, ac.rargate_stuck_min_minutes * 60,
+            )
             snapshot = build_alert_state(len(stale), rargate_stuck, now_ts)
             Path(ac.alert_file).write_text(json.dumps(snapshot, indent=2))
         except Exception:

@@ -210,6 +210,15 @@ class AlertingCfg(BaseModel):
     check_interval_seconds: int = 600
     alert_file: str = "/mnt/cache/dc-bridge/pending_alerts.json"
     rargate_status_file: str = ""  # e.g. /mnt/cache/rargate/rargate-status.json; "" = skip that check
+    # rargate adds a release to stuck_releases the moment SFV validation has
+    # failed 3 times — as little as ~20s into a large, perfectly healthy
+    # in-progress download (seen live: two Harry Potter releases mid-transfer
+    # both tripped it within 20-30s). Only count a release toward the alert
+    # once it's been stuck at least this long — a real dead/incomplete
+    # release stays stuck indefinitely, so this only delays the alert for a
+    # genuine problem while filtering out every ordinary big download's
+    # first few seconds.
+    rargate_stuck_min_minutes: float = 30.0
     webhook_url: str = ""  # reserved for method="webhook"
 
 
