@@ -140,6 +140,29 @@ def test_tv_wrong_year_present_is_rejected():
     assert not tv_release_matches_year("Wallander.Villospar.2001.S01E03", 2005)
 
 
+def test_tv_yearless_release_still_permissive_without_require_year():
+    assert tv_release_matches_year("Chernobyl.S01E01.NORDiC.720p.WEB-DL-DBRETAiL", 2014)
+
+
+def test_tv_require_year_rejects_a_yearless_release():
+    # Real incident: searching "Chernobyl: Zone of Exclusion" (2014) found
+    # nothing under its full title, fell back to the bare short title
+    # "Chernobyl" — and grabbed a yearless 'Chernobyl.S01E01...' release that
+    # was actually the unrelated HBO 2019 miniseries. Once the distinguishing
+    # part of the title is gone, a yearless match can no longer be trusted.
+    assert not tv_release_matches_year(
+        "Chernobyl.S01E01.NORDiC.720p.WEB-DL-DBRETAiL", 2014, require_year=True,
+    )
+
+
+def test_tv_require_year_still_accepts_a_release_with_the_right_year():
+    assert tv_release_matches_year("Chernobyl.2014.S01E01.WEB-DL", 2014, require_year=True)
+
+
+def test_tv_require_year_still_rejects_a_release_with_the_wrong_year():
+    assert not tv_release_matches_year("Chernobyl.2019.S01E01.WEB-DL", 2014, require_year=True)
+
+
 # ── language / subtitle filters ──────────────────────────────────────────────
 
 

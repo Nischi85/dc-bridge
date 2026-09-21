@@ -791,14 +791,17 @@ def _select_candidates(
     """Group raw hub hits into release folders and apply the accept/reject guards
     (quality, adult, foreign-language dub, unwanted subs, title, year, season).
 
-    `require_year` (movies only) disables the normal yearless-SD-release
-    exemption in the year guard below — for a short/truncated title variant
-    (e.g. the pre-subtitle-separator fallback), a 2-word franchise name like
-    "Spider-Man" trivially satisfies the title guards for ANY same-franchise
-    release, so the year becomes the only thing left distinguishing the
-    requested film from every other entry; a yearless release can't be
+    `require_year` disables the normal yearless-release exemption in the
+    year guard below, for both movies and TV — for a short/truncated title
+    variant (e.g. the pre-subtitle-separator fallback), a short generic name
+    trivially satisfies the title guards for ANY same-named release (a
+    2-word franchise like "Spider-Man" for movies; a bare "Chernobyl" for TV,
+    which — real incident — matched the wholly unrelated HBO 2019 miniseries
+    while actually searching for the 2014 series "Chernobyl: Zone of
+    Exclusion"), so the year becomes the only thing left distinguishing the
+    requested title from every other entry; a yearless release can't be
     trusted to be the right one and must be rejected outright instead of
-    exempted.
+    exempted. See tv_release_matches_year's own docstring for the TV case.
 
     Returns {episode_key (or "movie") -> [candidate release dicts]}. Pure and
     synchronous — it neither touches the network nor state, so all side effects
@@ -968,10 +971,11 @@ def _select_candidates(
                 # before the first full sync populates episode_air_years).
                 if cfg.match.tv_year_guard:
                     want_year = (item.get("episode_air_years") or {}).get(ek) or item.get("year")
-                    if not tv_release_matches_year(release_name, want_year, cfg.match.year_tolerance):
+                    if not tv_release_matches_year(release_name, want_year, cfg.match.year_tolerance, require_year):
                         log.debug(
-                            "poll %s: skip %r — year mismatch for %s (want %s±%s)",
+                            "poll %s: skip %r — year mismatch for %s (want %s±%s)%s",
                             item_id, release_name, ek, want_year, cfg.match.year_tolerance,
+                            " [strict: short-title fallback]" if require_year else "",
                         )
                         continue
                 candidates_by_key.setdefault(ek, []).append(
@@ -1683,6 +1687,7 @@ async def _poll_item(
                     candidates_by_key = _select_candidates(
                         results, kind, title_variant, item, cfg, item_priority, {ek}, item_id,
                         exclude_releases=exclude,
+                        require_year=(title_variant == ep_short_title),
                     )
                     if candidates_by_key:
                         if vi > 0:

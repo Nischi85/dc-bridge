@@ -257,20 +257,36 @@ def release_matches_year(name: str, want_year: int | None, tolerance: int = 1) -
     return any(abs(y - want_year) <= tolerance for y in years)
 
 
-def tv_release_matches_year(release_name: str, want_year: Optional[int], tolerance: int = 1) -> bool:
+def tv_release_matches_year(
+    release_name: str, want_year: Optional[int], tolerance: int = 1, require_year: bool = False,
+) -> bool:
     """True if `release_name` carries no year, OR a year within ±tolerance of
     `want_year` (the SPECIFIC episode's broadcast year, not the show's start
     year — a long-running series spans many years, so a per-item year would be
     too coarse). Unlike release_matches_year (movies), a yearless TV release is
-    NOT rejected — standard SxxExx scene naming legitimately omits the year for
-    ordinary episodes; only a PRESENT, wrong year is a signal something's off
-    (e.g. a same-titled remake produced in a different year, 'Wallander...2008'
-    for a 2005-aired episode). Permissive when want_year is unknown."""
+    NOT rejected by default — standard SxxExx scene naming legitimately omits
+    the year for ordinary episodes; only a PRESENT, wrong year is a signal
+    something's off (e.g. a same-titled remake produced in a different year,
+    'Wallander...2008' for a 2005-aired episode). Permissive when want_year is
+    unknown.
+
+    `require_year` drops that yearless exemption — same idea, and same name,
+    as movies' require_year on the short-title search fallback (see
+    _select_candidates). Real incident: a search for "Chernobyl: Zone of
+    Exclusion" (2014, an obscure Russian series) found nothing under its full
+    title, fell back to the bare "Chernobyl" — and grabbed a plain
+    'Chernobyl.S01E01...' release that was actually the unrelated, far more
+    widely distributed HBO 2019 miniseries; a title collision the movie side
+    already guards against but TV's own short-title fallback didn't. With no
+    year in the release name at all, the permissive default let it straight
+    through. require_year=True is for exactly that fallback: once the
+    distinguishing part of the title has been stripped for the search, a
+    completely yearless result can no longer be trusted as the right show."""
     if not want_year:
         return True
     years = [int(y) for y in _YEAR_RE.findall(release_name)]
     if not years:
-        return True
+        return not require_year
     return any(abs(y - want_year) <= tolerance for y in years)
 
 
