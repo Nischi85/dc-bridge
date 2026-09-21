@@ -1234,14 +1234,9 @@ async def list_release_candidates(
     title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
     search_query = f"{title_query} {key}" if kind == "tv" else title_query
 
-    iid = await ad.create_search_instance()
+    iid, results = await ad.search_release_candidates(search_query, wait)
     if iid is None:
         return []
-    if not await ad.hub_search(iid, search_query, extensions=None):
-        await ad.delete_instance(iid)
-        return []
-    await asyncio.sleep(wait)
-    results = await ad.get_results(iid, 0, 500)
 
     item_priority = item.get("quality_priority") or []
     lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
@@ -1355,14 +1350,10 @@ async def select_release(
     title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
     search_query = f"{title_query} {key}" if kind == "tv" else title_query
 
-    iid = await ad.create_search_instance()
+    iid, results = await ad.search_release_candidates(search_query, 8.0)
     if iid is None:
         return None
     try:
-        if not await ad.hub_search(iid, search_query, extensions=None):
-            return None
-        await asyncio.sleep(8.0)
-        results = await ad.get_results(iid, 0, 500)
         candidates_by_key = _select_candidates(
             results, kind, title, item, cfg, item_priority, {key}, item_id,
         )
@@ -1675,14 +1666,12 @@ async def _poll_item(
             exclude = await state.get_failed_releases(item_id, ek)
             for vi, title_variant in enumerate(ep_title_variants):
                 ep_query = query if vi == 0 else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
-                ep_iid = await ad.create_search_instance()
+                ep_iid, results = await ad.search_release_candidates(
+                    f"{ep_query} {ek}", cfg.poller.tv_search_settle_seconds,
+                )
                 if ep_iid is None:
                     continue
                 try:
-                    if not await ad.hub_search(ep_iid, f"{ep_query} {ek}"):
-                        continue
-                    await asyncio.sleep(cfg.poller.tv_search_settle_seconds)
-                    results = await ad.get_results(ep_iid, 0, 500)
                     total_results += len(results)
                     candidates_by_key = _select_candidates(
                         results, kind, title_variant, item, cfg, item_priority, {ek}, item_id,
@@ -1756,16 +1745,12 @@ async def _poll_item(
         movie_exclude = await state.get_failed_releases(item_id, "movie")
         for vi, title_variant in enumerate(title_variants):
             variant_query = query if vi == 0 else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
-            iid = await ad.create_search_instance()
+            iid, results = await ad.search_release_candidates(variant_query, 8.0)
             if iid is None:
                 continue
             attempted = True
             keep = False  # True once this instance is the winner (queued after the loop)
             try:
-                if not await ad.hub_search(iid, variant_query, extensions=None):
-                    continue
-                await asyncio.sleep(8.0)
-                results = await ad.get_results(iid, 0, 500)
                 log.info(
                     "poll %s: %d hub result(s) for %r%s",
                     item_id, len(results), variant_query,

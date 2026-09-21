@@ -58,14 +58,20 @@ def _dir_result(name, path, size_mb, rid):
 
 
 class FakeAd:
-    def __init__(self, results, bundles=None):
+    def __init__(self, results, bundles=None, directory_empty=False):
         self._results = results
+        # directory_empty simulates a hub where this exact query returns
+        # nothing under file_type=directory (only loose files) — exercises
+        # search_release_candidates' fallback-to-any-type retry.
+        self._directory_empty = directory_empty
         self._bundles = bundles or []
         self.removed_bundle_ids = []
         self.queued = []
         self._next_iid = 0
         self.instances_deleted = []
-        self.hub_searches = []
+        self.hub_searches = []       # query strings, one per hub_search call
+        self.hub_search_file_types = []  # the file_type each call above requested
+        self._last_file_type = None
 
     async def ensure_auth(self):
         pass
@@ -74,11 +80,15 @@ class FakeAd:
         self._next_iid += 1
         return self._next_iid
 
-    async def hub_search(self, iid, query, extensions=None):
+    async def hub_search(self, iid, query, extensions=None, file_type=None):
         self.hub_searches.append(query)
+        self.hub_search_file_types.append(file_type)
+        self._last_file_type = file_type
         return True
 
     async def get_results(self, iid, start, count):
+        if self._last_file_type == "directory" and self._directory_empty:
+            return []
         return self._results
 
     async def delete_instance(self, iid):
@@ -94,6 +104,22 @@ class FakeAd:
     async def queue_result(self, iid, tth_or_dir_id, target_dir):
         self.queued.append((tth_or_dir_id, target_dir))
         return {"bundle_info": {"id": 999}}
+
+    async def search_release_candidates(self, pattern, wait, extensions=None):
+        # Mirrors dcbridge.airdcpp.AirDCPP.search_release_candidates against
+        # these same fakes, so tests exercise the real directory-first /
+        # fallback-to-any control flow rather than a stubbed shortcut.
+        iid = await self.create_search_instance()
+        if await self.hub_search(iid, pattern, extensions=extensions, file_type="directory"):
+            results = await self.get_results(iid, 0, 500)
+            if results:
+                return iid, results
+        await self.delete_instance(iid)
+        iid = await self.create_search_instance()
+        if not await self.hub_search(iid, pattern, extensions=extensions):
+            await self.delete_instance(iid)
+            return None, []
+        return iid, await self.get_results(iid, 0, 500)
 
 
 class FakeState:
@@ -142,6 +168,32 @@ def test_lists_every_passing_release_scored_and_sorted(monkeypatch):
     }
 
 
+def test_listing_searches_directories_first(monkeypatch):
+    # Directory-type results need none of the loose-file parent-dir
+    # grouping a plain file hit does — fewer, cleaner candidates in the
+    # common case (measured live against a real hub: an unrestricted
+    # "Chernobyl" search returned a 331/169 directory/file mix at the
+    # result cap; the same search with file_type=directory returned 500
+    # clean release folders).
+    results = [_dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1")]
+    ad = FakeAd(results)
+    asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    assert ad.hub_search_file_types == ["directory"]  # found on the first, directory-scoped attempt — no fallback needed
+
+
+def test_listing_falls_back_to_any_type_when_directory_search_is_empty(monkeypatch):
+    # Some hubs/some content only ever surfaces as individual file hits,
+    # never a directory listing — the exact case dc-bridge's own
+    # _select_candidates grouping-by-parent-dir logic exists for. A
+    # directory-only search finding nothing must not be treated as "no
+    # candidates" outright.
+    results = [_dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1")]
+    ad = FakeAd(results, directory_empty=True)
+    out = asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
+    assert len(out) == 1
+    assert ad.hub_search_file_types == ["directory", None]  # fell back after the first came back empty
+
+
 def test_rejects_a_release_that_fails_the_normal_guards(monkeypatch):
     # Wrong year — same guard _select_candidates always applies.
     results = [_dir_result("Some.Movie.2011.1080p.BluRay.x264-GROUP", "/Movies/Some.Movie.2011.1080p.BluRay.x264-GROUP/", 8000, "d1")]
@@ -167,13 +219,15 @@ def test_tv_uses_the_episode_key_in_the_search_query(monkeypatch):
 def test_empty_hub_search_returns_no_candidates(monkeypatch):
     ad = FakeAd([])
 
-    async def fake_hub_search(iid, query, extensions=None):
+    async def fake_hub_search(iid, query, extensions=None, file_type=None):
         return False
 
     ad.hub_search = fake_hub_search
     out = asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
     assert out == []
-    assert ad.instances_deleted == [1]
+    # directory-scoped dispatch fails -> instance 1 discarded, fallback
+    # dispatch on a fresh instance 2 also fails -> both cleaned up.
+    assert ad.instances_deleted == [1, 2]
 
 
 def test_a_second_listing_for_the_same_item_and_key_evicts_the_first_instance(monkeypatch):
@@ -192,7 +246,7 @@ def test_listing_purges_other_expired_cache_entries(monkeypatch):
         "iid": 777, "by_name": {}, "created_at": 0.0,  # ancient -> expired
     }
 
-    async def fake_hub_search(iid, query, extensions=None):
+    async def fake_hub_search(iid, query, extensions=None, file_type=None):
         return False
 
     ad.hub_search = fake_hub_search

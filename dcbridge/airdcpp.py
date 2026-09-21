@@ -136,6 +136,7 @@ class AirDCPP:
         instance_id: int,
         pattern: str,
         extensions: Optional[list[str]] = None,
+        file_type: Optional[str] = None,
     ) -> bool:
         # Held for the whole dispatch (not just the wait) so a second caller
         # queued behind this one always measures its gap from when THIS
@@ -148,6 +149,8 @@ class AirDCPP:
             body: dict[str, Any] = {"query": {"pattern": pattern}}
             if extensions:
                 body["query"]["extensions"] = list(extensions)
+            if file_type:
+                body["query"]["file_type"] = file_type
             if self.cfg.hub_urls:
                 body["hub_urls"] = self.cfg.hub_urls
             r = await self._retry_on_401(
@@ -157,6 +160,48 @@ class AirDCPP:
             log.warning("airdcpp: hub_search %r -> %s %s", pattern, r.status_code, _truncate(r.text))
             return False
         return True
+
+    async def search_release_candidates(
+        self, pattern: str, wait: float, extensions: Optional[list[str]] = None,
+    ) -> tuple[Optional[int], list[dict]]:
+        """One release search, directory results preferred: AirDC++'s
+        file_type="directory" first — a release-folder hit is unambiguous
+        and needs none of the loose-file parent-dir grouping a plain file
+        hit does, so this is both fewer and more directly usable results in
+        the common case (measured live: an unrestricted "Chernobyl" search
+        returned 331 directory + 169 loose-file hits at the 500 cap; the
+        same search with file_type=directory returned 500 clean release
+        folders). Only retries WITHOUT that restriction if the directory-
+        scoped attempt comes back completely empty — some hubs/some content
+        only ever surfaces as individual file hits, never a directory
+        listing (see dcbridge.poller._select_candidates' own comment on
+        this), so a genuinely file-only-indexed release still gets found —
+        at the cost of one extra search, only in that one case.
+
+        Returns (instance_id, results). instance_id is None (results
+        always []) if a search instance couldn't be created, or the hub
+        search itself failed outright on both attempts. The caller owns
+        deleting whichever instance comes back once done reading its
+        results — this never deletes on the success path, since the caller
+        still needs the live instance to queue against a result's tth."""
+        iid = await self.create_search_instance()
+        if iid is None:
+            return None, []
+        if await self.hub_search(iid, pattern, extensions=extensions, file_type="directory"):
+            await asyncio.sleep(wait)
+            results = await self.get_results(iid, 0, 500)
+            if results:
+                return iid, results
+        await self.delete_instance(iid)
+
+        iid = await self.create_search_instance()
+        if iid is None:
+            return None, []
+        if not await self.hub_search(iid, pattern, extensions=extensions):
+            await self.delete_instance(iid)
+            return None, []
+        await asyncio.sleep(wait)
+        return iid, await self.get_results(iid, 0, 500)
 
     async def get_results(self, instance_id: int, start: int = 0, count: int = 100) -> list[dict]:
         r = await self._retry_on_401(
