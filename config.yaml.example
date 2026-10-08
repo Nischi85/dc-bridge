@@ -80,12 +80,13 @@ quality:
   # Per-path audio-language preference. For an item whose target dir contains
   # `path_contains`, releases are ranked by `languages` order ABOVE quality
   # tier — a preferred-language release beats a better-quality one in another
-  # language (kids can't read subtitles). "swedish" also matches NORDiC
-  # multi-dub packs; an untagged release counts as "english". First matching
-  # rule wins; omit / empty list = no language preference.
+  # language (kids can't read subtitles). "swedish" = an explicit SWEDiSH tag;
+  # "nordic" = a NORDiC tag (often Nordic subs only, not Swedish audio); an
+  # untagged release counts as "english". First matching rule wins; omit /
+  # empty list = no language preference.
   language_priority:
     - path_contains: TV.For.Children
-      languages: [swedish, english]
+      languages: [swedish, nordic, english]
 
 poller:
   interval_seconds: 900       # 15 min per full sweep

@@ -21,7 +21,7 @@ HP_ALTS = [
 ]
 
 ENGLISH = "Harry.Potter.And.The.Philosophers.Stone.2001.720p.BluRay.x264-CRF"
-NORDIC = "Harry.Potter.And.The.Sorcerers.Stone.2001.NORDIC.720p.BluRay.x264-Danishbits"
+SWEDISH = "Harry.Potter.and.The.Sorcerers.Stone.2001.SWEDiSH.720p.BluRay.x264-FARGIRENIS"
 
 
 class QueryAd(FakeAd):
@@ -56,7 +56,7 @@ def _kids_cfg():
 def _hp_ad():
     return QueryAd({
         "Philosophers Stone": [_dir_result(ENGLISH, f"/Movies/{ENGLISH}/", 7000, "d1")],
-        "Sorcerers Stone": [_dir_result(NORDIC, f"/Movies/{NORDIC}/", 7000, "d2")],
+        "Sorcerers Stone": [_dir_result(SWEDISH, f"/Movies/{SWEDISH}/", 7000, "d2")],
     })
 
 
@@ -70,20 +70,20 @@ def test_rank_alt_titles_puts_latin_high_overlap_first():
 def test_has_preferred_language():
     assert has_preferred_language([ENGLISH], [])
     assert not has_preferred_language([ENGLISH], ["swedish", "english"])
-    assert has_preferred_language([ENGLISH, NORDIC], ["swedish", "english"])
+    assert has_preferred_language([ENGLISH, SWEDISH], ["swedish", "english"])
 
 
 def test_listing_falls_through_to_an_alt_title_with_the_preferred_language():
     ad = _hp_ad()
     out = asyncio.run(poller.list_release_candidates(_kids_cfg(), ad, _hp_item(), "movie", wait=0))
-    assert [c["release_name"] for c in out] == [NORDIC]
+    assert [c["release_name"] for c in out] == [SWEDISH]
     # Stopped at Sorcerer's Stone (ranked first among alts) — no further searches.
     assert any("Sorcerers Stone" in q for q in ad.hub_searches)
     assert not any("Kamen" in q for q in ad.hub_searches)
 
 
 def test_listing_keeps_canonical_when_it_already_has_the_preferred_language():
-    ad = QueryAd({"Philosophers Stone": [_dir_result(NORDIC.replace("Sorcerers", "Philosophers"), "/M/x/", 7000, "d1")]})
+    ad = QueryAd({"Philosophers Stone": [_dir_result(SWEDISH.replace("Sorcerers", "Philosophers"), "/M/x/", 7000, "d1")]})
     out = asyncio.run(poller.list_release_candidates(_kids_cfg(), ad, _hp_item(), "movie", wait=0))
     assert len(out) == 1
     assert all("Philosophers Stone" in q for q in ad.hub_searches)
@@ -105,6 +105,6 @@ def test_listing_falls_back_to_canonical_when_no_variant_has_the_preferred_langu
 
 def test_select_cache_miss_finds_a_release_only_listed_under_an_alt_title():
     ad = _hp_ad()
-    queued = asyncio.run(poller.select_release(_kids_cfg(), FakeState(), ad, _hp_item(), "movie", NORDIC))
+    queued = asyncio.run(poller.select_release(_kids_cfg(), FakeState(), ad, _hp_item(), "movie", SWEDISH))
     assert queued == 1
     assert ad.queued and ad.queued[0][0] == "d2"

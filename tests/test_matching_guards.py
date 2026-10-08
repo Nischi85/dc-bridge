@@ -318,7 +318,7 @@ def test_score_result_repack_tag_not_triggered_by_a_title_word():
 def test_lang_priority_beats_a_better_quality_tier():
     q = _quality(priority=["web 1080p", "web 720p"])
     lp = ["swedish", "english"]
-    swe_worse = score_result("PAW.Patrol.2023.NORDiC.720p.WEB.H264-EGEN", 900 * 1024 * 1024, q, None, lp)
+    swe_worse = score_result("PAW.Patrol.2023.SWEDiSH.720p.WEB.H264-EGEN", 900 * 1024 * 1024, q, None, lp)
     eng_better = score_result("PAW.Patrol.2023.1080p.WEB.H264-DOLORES", 5000 * 1024 * 1024, q, None, lp)
     assert swe_worse > eng_better  # Swedish wins even at a worse resolution
 
@@ -339,15 +339,31 @@ def test_lang_priority_untagged_release_counts_as_english():
     assert eng_untagged > danish  # english is listed; danish isn't -> english preferred
 
 
-def test_release_languages_maps_nordic_to_swedish():
+def test_release_languages_keeps_nordic_separate_from_swedish():
     from dcbridge.helpers import release_languages, resolve_lang_priority
     from dcbridge.config import LanguageRule
-    assert "swedish" in release_languages("Show.S01E01.NORDiC.1080p.WEB-GRP")
+    # NORDiC often means Nordic SUBTITLES only (Danishbits' DANISH.EDITION:
+    # English + Danish audio, SWE subs) — never Swedish audio by itself.
+    assert release_languages("Show.S01E01.NORDiC.1080p.WEB-GRP") == {"nordic"}
+    assert release_languages("Movie.2001.SWEDiSH.720p.BluRay.x264-GRP") == {"swedish"}
+    assert release_languages("Movie.2001.SWEDISH.NORDICSUBS.1080p.BluRay-GRP") == {"swedish"}
+    # Subtitle-only tags carry no audio language.
+    assert release_languages("Movie.2001.SWESUB.720p.BluRay-GRP") == {"english"}
     assert release_languages("Show.S01E01.1080p.WEB-GRP") == {"english"}
     q = _quality(language_priority=[LanguageRule(path_contains="TV.For.Children",
-                                                 languages=["Swedish", "English"])])
-    assert resolve_lang_priority(q, "/mnt/zzd/share/fin/TV.For.Children/Series/Bluey") == ["swedish", "english"]
+                                                 languages=["Swedish", "Nordic", "English"])])
+    assert resolve_lang_priority(q, "/mnt/zzd/share/fin/TV.For.Children/Series/Bluey") == ["swedish", "nordic", "english"]
     assert resolve_lang_priority(q, "/mnt/zzd/share/fin/TV.Series/Cobra.Kai") == []
+
+
+def test_explicit_swedish_outranks_nordic_outranks_english():
+    q = _quality(priority=["1080p", "720p"])
+    lp = ["swedish", "nordic", "english"]
+    mb = 1024 * 1024
+    swe_720 = score_result("Movie.2001.SWEDiSH.720p.BluRay.x264-A", 7000 * mb, q, None, lp)
+    nordic_1080 = score_result("Movie.2001.NORDIC.1080p.BluRay.x264-B", 12000 * mb, q, None, lp)
+    eng_1080 = score_result("Movie.2001.1080p.BluRay.x264-C", 12000 * mb, q, None, lp)
+    assert swe_720 > nordic_1080 > eng_1080
 
 
 # ── text sanitisation ──────────────────────────────────────────────────────────

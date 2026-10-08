@@ -145,7 +145,7 @@ class FakeState:
 def test_lists_every_passing_release_scored_and_sorted(monkeypatch):
     results = [
         _dir_result("Some.Movie.2020.1080p.BluRay.x264-GROUP", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GROUP/", 8000, "d1"),
-        _dir_result("Some.Movie.2020.NORDIC.1080p.BluRay.x264-GROUP2", "/Movies/Some.Movie.2020.NORDIC.1080p.BluRay.x264-GROUP2/", 8000, "d2"),
+        _dir_result("Some.Movie.2020.SWEDiSH.1080p.BluRay.x264-GROUP2", "/Movies/Some.Movie.2020.SWEDiSH.1080p.BluRay.x264-GROUP2/", 8000, "d2"),
     ]
     ad = FakeAd(results)
     cfg = _cfg(language_priority=[LanguageRule(path_contains="Movies", languages=["swedish", "english"])])
@@ -153,8 +153,8 @@ def test_lists_every_passing_release_scored_and_sorted(monkeypatch):
 
     assert len(out) == 2
     names = [c["release_name"] for c in out]
-    assert "Some.Movie.2020.NORDIC.1080p.BluRay.x264-GROUP2" in names
-    # Nordic wins first — language_priority applies under /Movies here.
+    assert "Some.Movie.2020.SWEDiSH.1080p.BluRay.x264-GROUP2" in names
+    # Swedish wins first — language_priority applies under /Movies here.
     assert out[0]["release_name"].endswith("GROUP2")
     assert out[0]["languages"] == ["swedish"]
     assert out[1]["languages"] == ["english"]
@@ -164,7 +164,7 @@ def test_lists_every_passing_release_scored_and_sorted(monkeypatch):
     assert ad.instances_deleted == []
     cached = poller._CANDIDATE_CACHE["radarr:1:movie"]
     assert set(cached["by_name"]) == {
-        "Some.Movie.2020.1080p.BluRay.x264-GROUP", "Some.Movie.2020.NORDIC.1080p.BluRay.x264-GROUP2",
+        "Some.Movie.2020.1080p.BluRay.x264-GROUP", "Some.Movie.2020.SWEDiSH.1080p.BluRay.x264-GROUP2",
     }
 
 

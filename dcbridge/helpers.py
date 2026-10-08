@@ -804,11 +804,17 @@ _LANG_BONUS = 1_000_000_000   # ranks ABOVE quality tier (0 when no rule matches
 _TIER = 10_000_000
 _REPACK_BONUS = 1_000_000
 
-# Scene language tags -> canonical name. "swedish" also covers NORDiC (a
-# multi-dub pack that includes Swedish). A release matching none of these is
-# treated as English (the scene default for an unmarked release).
+# Scene language tags -> canonical name. "nordic" is its own entry, NOT an
+# alias of "swedish": a NORDiC release often only carries Nordic SUBTITLES
+# (e.g. Danishbits' "DANISH.EDITION": English + Danish audio, SWE subs), so
+# only an explicit SWEDiSH tag counts as Swedish audio — rank "nordic" after
+# "swedish" in language_priority to still prefer it over plain English.
+# SWESUB/NORDICSUBS are subtitle tags and deliberately match nothing here.
+# A release matching none of these is treated as English (the scene default
+# for an unmarked release).
 _LANG_ALIASES: dict[str, tuple[str, ...]] = {
-    "swedish": (r"\bswedish\b", r"\bnordic\b", r"\bnordics\b", r"\bswesub\b"),
+    "swedish": (r"\bswedish\b",),
+    "nordic": (r"\bnordic\b", r"\bnordics\b"),
     "english": (r"\benglish\b",),
     "danish": (r"\bdanish\b",),
     "norwegian": (r"\bnorwegian\b", r"\bnorsk\b"),
