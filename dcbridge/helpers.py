@@ -854,6 +854,40 @@ def resolve_lang_priority(quality: QualityCfg, target_dir_fs: Optional[str]) -> 
     return []
 
 
+def _latin_share(s: str) -> float:
+    """Fraction of letters in `s` that are Latin script (accented included)."""
+    letters = [c for c in s if c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if unicodedata.name(c, "").startswith("LATIN")) / len(letters)
+
+
+def rank_alt_titles(title: str, alt_titles: list[str]) -> list[str]:
+    """Alternate titles ordered most-likely-to-match-a-scene-name first:
+    Latin-script titles before non-Latin ones (scene names are Latin, so a
+    Korean/Hebrew title can't match), then by how many words they share
+    with the canonical title — e.g. for "Harry Potter and the
+    Philosopher's Stone", "...and the Sorcerer's Stone" outranks the
+    Serbian/Greek transliterations TMDB happens to list first. Stable
+    otherwise, so TMDB's own order breaks ties."""
+    canon = set(sanitize_for_dc_search(title).lower().split())
+
+    def key(alt: str) -> tuple[int, int]:
+        overlap = len(canon & set(sanitize_for_dc_search(alt).lower().split()))
+        return (0 if _latin_share(alt) >= 0.5 else 1, -overlap)
+
+    return sorted(alt_titles, key=key)
+
+
+def has_preferred_language(names: list[str], lang_priority: list[str]) -> bool:
+    """True if any release name carries the item's MOST-preferred language,
+    or if no language rule applies at all (nothing to hold out for)."""
+    if not lang_priority:
+        return True
+    want = lang_priority[0].lower()
+    return any(want in release_languages(n) for n in names)
+
+
 def is_repack(name: str) -> bool:
     """True if this release name carries a REPACK / PROPER / RERIP tag (in the
     technical tail, not the title)."""

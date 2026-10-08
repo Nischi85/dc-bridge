@@ -24,6 +24,7 @@ from dcbridge.helpers import (
     _utc_iso,
     compute_cadence,
     episode_keys_from_name,
+    has_preferred_language,
     has_rejected_extension,
     has_unwanted_subs,
     is_adult_release,
@@ -34,6 +35,7 @@ from dcbridge.helpers import (
     loosen_hyphens_for_search,
     movie_title_prefix_ok,
     passes_quality,
+    rank_alt_titles,
     release_has_required_tag,
     release_languages,
     release_matches_title,
@@ -1202,6 +1204,33 @@ async def _evict_candidate_cache(ad: AirDCPP, cache_key: str) -> None:
             log.debug("delete_instance %s failed during cache evict (ignored)", entry["iid"])
 
 
+def _listing_title_variants(cfg: Config, item: dict) -> list[str]:
+    """Titles the human-triggered listing/select pair searches under —
+    canonical first, then the same ranked alt titles a poll would fall
+    back to."""
+    title = item["title"]
+    return [title] + rank_alt_titles(title, list(item.get("alt_titles") or []))[
+        : max(0, cfg.poller.alt_title_search_limit)
+    ]
+
+
+async def _search_listing_variant(
+    cfg: Config, ad: AirDCPP, item: dict, key: str, title_variant: str, wait: float,
+    item_priority: list[str],
+) -> tuple[Optional[int], int, list[dict]]:
+    """One hub search under `title_variant` + the normal guards. Returns
+    (instance_id, raw result count, passing groups for `key`)."""
+    title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
+    search_query = f"{title_query} {key}" if item["kind"] == "tv" else title_query
+    iid, results = await ad.search_release_candidates(search_query, wait)
+    if iid is None:
+        return None, 0, []
+    groups = _select_candidates(
+        results, item["kind"], title_variant, item, cfg, item_priority, {key}, item["id"],
+    ).get(key, [])
+    return iid, len(results), groups
+
+
 async def list_release_candidates(
     cfg: Config, ad: AirDCPP, item: dict, key: str, wait: float = 8.0,
 ) -> list[dict]:
@@ -1231,22 +1260,32 @@ async def list_release_candidates(
             log.debug("delete_instance %s failed during TTL purge (ignored)", stale["iid"])
     await _evict_candidate_cache(ad, cache_key)
 
-    title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
-    search_query = f"{title_query} {key}" if kind == "tv" else title_query
-
-    iid, results = await ad.search_release_candidates(search_query, wait)
-    if iid is None:
-        return []
-
     item_priority = item.get("quality_priority") or []
     lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
-    candidates_by_key = _select_candidates(
-        results, kind, title, item, cfg, item_priority, {key}, item_id,
-    )
-    groups = candidates_by_key.get(key, [])
-    if not groups:
-        await ad.delete_instance(iid)
-        log.info("candidates %s key=%s: %d hub result(s) -> 0 passing candidate(s)", item_id, key, len(results))
+
+    # Same language-aware title fallback as a poll: canonical title first; if
+    # it yields nothing, or nothing in the preferred language, try the ranked
+    # alt titles and keep the first that has a preferred-language release
+    # (else the first that had anything at all).
+    iid, groups, n_results = None, [], 0
+    for title_variant in _listing_title_variants(cfg, item):
+        v_iid, v_n, v_groups = await _search_listing_variant(
+            cfg, ad, item, key, title_variant, wait, item_priority,
+        )
+        if v_iid is None:
+            continue
+        n_results += v_n
+        preferred = bool(v_groups) and has_preferred_language([g["release_name"] for g in v_groups], lang_priority)
+        if v_groups and (iid is None or preferred):
+            if iid is not None:
+                await ad.delete_instance(iid)
+            iid, groups = v_iid, v_groups
+        else:
+            await ad.delete_instance(v_iid)
+        if preferred:
+            break
+    if iid is None:
+        log.info("candidates %s key=%s: %d hub result(s) -> 0 passing candidate(s)", item_id, key, n_results)
         return []
 
     _CANDIDATE_CACHE[cache_key] = {
@@ -1265,7 +1304,7 @@ async def list_release_candidates(
     ]
     out.sort(key=lambda c: c["score"], reverse=True)
     log.info("candidates %s key=%s: %d hub result(s) -> %d passing candidate(s)",
-             item_id, key, len(results), len(out))
+             item_id, key, n_results, len(out))
     return out
 
 
@@ -1347,28 +1386,31 @@ async def select_release(
     # process restarted since. Fall back to the original always-correct
     # path: search again and re-validate before queueing.
     _CANDIDATE_CACHE.pop(cache_key, None)
-    title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title))
-    search_query = f"{title_query} {key}" if kind == "tv" else title_query
-
-    iid, results = await ad.search_release_candidates(search_query, 8.0)
-    if iid is None:
-        return None
-    try:
-        candidates_by_key = _select_candidates(
-            results, kind, title, item, cfg, item_priority, {key}, item_id,
+    # The release may only be findable under an alt title (see
+    # list_release_candidates) — try each until it turns up.
+    queued = None
+    for title_variant in _listing_title_variants(cfg, item):
+        iid, _n, groups = await _search_listing_variant(
+            cfg, ad, item, key, title_variant, 8.0, item_priority,
         )
-        chosen = [g for g in candidates_by_key.get(key, []) if g["release_name"] == release_name]
-        if not chosen:
-            return None
-        queued = await _queue_candidates(
-            ad, state, cfg, iid, kind, item_id,
-            {key: chosen}, set(), target_base_smb, item_priority, lang_priority,
-        )
-    finally:
+        if iid is None:
+            continue
         try:
-            await ad.delete_instance(iid)
-        except Exception:
-            log.debug("delete_instance %s failed (ignored)", iid)
+            chosen = [g for g in groups if g["release_name"] == release_name]
+            if not chosen:
+                continue
+            queued = await _queue_candidates(
+                ad, state, cfg, iid, kind, item_id,
+                {key: chosen}, set(), target_base_smb, item_priority, lang_priority,
+            )
+            break
+        finally:
+            try:
+                await ad.delete_instance(iid)
+            except Exception:
+                log.debug("delete_instance %s failed (ignored)", iid)
+    if queued is None:
+        return None
 
     log.warning("select %s: queued=%s release=%r key=%s (cache miss, re-searched)",
                 item_id, bool(queued), release_name, key)
@@ -1659,7 +1701,7 @@ async def _poll_item(
         ep_short_title = title_before_subtitle_separator(title)
         if ep_short_title:
             ep_title_variants.append(ep_short_title)
-        ep_title_variants += list(item.get("alt_titles") or [])[
+        ep_title_variants += rank_alt_titles(title, list(item.get("alt_titles") or []))[
             : max(0, cfg.poller.alt_title_search_limit)
         ]
         for idx, ek in enumerate(batch):
@@ -1732,13 +1774,17 @@ async def _poll_item(
         short_title = title_before_subtitle_separator(title)
         if short_title:
             title_variants.append(short_title)
-        title_variants += list(item.get("alt_titles") or [])[
+        title_variants += rank_alt_titles(title, list(item.get("alt_titles") or []))[
             : max(0, cfg.poller.alt_title_search_limit)
         ]
         matched_title = title
         winning_iid = None
         candidates_by_key: dict[str, list[dict[str, Any]]] = {}
         attempted = False
+        # When a language rule applies, a variant whose candidates are all in a
+        # less-preferred language is only a fallback: keep trying the remaining
+        # variants for a preferred-language release (e.g. Swedish dubs of
+        # "Philosopher's Stone" are scene-named after the US "Sorcerer's Stone").
         # Releases already tried and rejected for this movie (stall fallback, or
         # a manual blocklist entry) — same exclusion the TV branch applies per
         # episode, keyed on the lone "movie" key.
@@ -1762,9 +1808,20 @@ async def _poll_item(
                     require_year=(title_variant == short_title),
                 )
                 if variant_candidates:
-                    matched_title, candidates_by_key, winning_iid = title_variant, variant_candidates, iid
-                    keep = True
-                    break
+                    names = [g["release_name"] for gs in variant_candidates.values() for g in gs]
+                    preferred = has_preferred_language(names, lang_priority)
+                    if winning_iid is None or preferred:
+                        if winning_iid is not None:
+                            try:
+                                await ad.delete_instance(winning_iid)
+                            except Exception:
+                                log.debug("delete_instance %s failed (ignored)", winning_iid)
+                        matched_title, candidates_by_key, winning_iid = title_variant, variant_candidates, iid
+                        keep = True
+                    if preferred:
+                        break
+                    log.info("poll %s: no %s release under %r, trying remaining title variant(s)",
+                             item_id, lang_priority[0], title_variant)
             finally:
                 if not keep:
                     try:

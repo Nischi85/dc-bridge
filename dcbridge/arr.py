@@ -595,7 +595,7 @@ async def fetch_movie_item(cfg: Config, movie_id: str) -> Optional[dict]:
         named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "radarr")
     return {
         "id": f"radarr:{movie_id}", "kind": "movie", "title": m.get("title") or "?",
-        "year": m.get("year"), "target_dir_fs": target_dir_fs,
+        "year": m.get("year"), "target_dir_fs": target_dir_fs, "alt_titles": _alt_titles(m),
         "quality_priority": named_priority if named_priority is not None
         else (profiles_by_id.get(m.get("qualityProfileId")) or []),
     }
@@ -638,6 +638,7 @@ async def fetch_series_item(cfg: Config, series_id: str) -> Optional[dict]:
         named_priority = _named_profile_priority(cfg.quality.profile_name, profiles_by_name, "sonarr")
     return {
         "id": f"sonarr:{series_id}", "kind": "tv", "title": s.get("title") or "?",
+        "alt_titles": _alt_titles(s),
         "year": s.get("year"), "target_dir_fs": target_dir_fs,
         "episode_air_years": episode_years,
         "quality_priority": named_priority if named_priority is not None

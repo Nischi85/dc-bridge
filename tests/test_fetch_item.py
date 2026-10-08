@@ -69,7 +69,7 @@ def test_fetch_movie_item_works_even_when_hasfile_is_true(monkeypatch):
     item = asyncio.run(arr.fetch_movie_item(_cfg(), "42"))
     assert item == {
         "id": "radarr:42", "kind": "movie", "title": "Some Movie", "year": 2020,
-        "target_dir_fs": "/share/Movies", "quality_priority": [],
+        "target_dir_fs": "/share/Movies", "quality_priority": [], "alt_titles": [],
     }
 
 
@@ -139,7 +139,7 @@ def test_fetch_series_item_works_even_when_fully_downloaded(monkeypatch):
         "id": "sonarr:9", "kind": "tv", "title": "Some Show", "year": 2020,
         "target_dir_fs": "/share/TV.Series/Some.Show",
         "episode_air_years": {"S01E01": 2020, "S01E02": 2020},
-        "quality_priority": [],
+        "quality_priority": [], "alt_titles": [],
     }
 
 
