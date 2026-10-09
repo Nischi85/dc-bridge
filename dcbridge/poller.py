@@ -27,7 +27,6 @@ from dcbridge.helpers import (
     is_single_season,
     part_episode_keys,
     has_preferred_language,
-    has_rejected_extension,
     has_unwanted_subs,
     is_adult_release,
     is_disc_source_release,
@@ -55,7 +54,6 @@ from dcbridge.util import (
     _HUB_PATH_SEP,
     _is_directory_result,
     _movie_in_queue,
-    _parent_dir_and_name,
     _release_complete,
     _release_complete_on_disk,
     _series_keys_in_queue,
@@ -820,35 +818,23 @@ def _select_candidates(
     synchronous — it neither touches the network nor state, so all side effects
     stay in poll_item / _queue_candidates.
     """
-    # Build release-folder candidates. Two result shapes feed the same
-    # per-folder bucket (keyed by the release folder's hub path):
-    #   - a DIRECTORY result = a whole release folder. Preferred: queue it by
-    #     its `id` so AirDC++ pulls the entire folder intact (see queue loop).
-    #   - loose FILE results, grouped by their hub parent dir, for hubs that
-    #     only return the individual files inside a release.
+    # Build release-folder candidates from DIRECTORY results only — a scene
+    # release is a whole folder, queued by its `id` so AirDC++ pulls it intact.
+    # Loose file hits are ignored.
     groups: dict[str, dict[str, Any]] = {}
     for r in results:
+        if not _is_directory_result(r):
+            continue
         path = r.get("path") or ""
-        if _is_directory_result(r):
-            release_name = (r.get("name") or path).rstrip("/").rsplit(_HUB_PATH_SEP, 1)[-1]
-            if not release_name:
-                continue
-            g = groups.setdefault(
-                path.rstrip("/"),
-                {"release_name": release_name, "files": [], "total_size": 0, "dir_id": None},
-            )
-            g["dir_id"] = r.get("id")
-            g["total_size"] = max(g["total_size"], int(r.get("size") or 0))
-        else:
-            parent_dir, release_name = _parent_dir_and_name(path)
-            if not parent_dir or not release_name:
-                continue
-            g = groups.setdefault(
-                parent_dir,
-                {"release_name": release_name, "files": [], "total_size": 0, "dir_id": None},
-            )
-            g["files"].append(r)
-            g["total_size"] += int(r.get("size") or 0)
+        release_name = (r.get("name") or path).rstrip("/").rsplit(_HUB_PATH_SEP, 1)[-1]
+        if not release_name:
+            continue
+        g = groups.setdefault(
+            path.rstrip("/"),
+            {"release_name": release_name, "total_size": 0, "dir_id": None},
+        )
+        g["dir_id"] = r.get("id")
+        g["total_size"] = max(g["total_size"], int(r.get("size") or 0))
 
     # Evaluate each release-folder group as a candidate.
     candidates_by_key: dict[str, list[dict[str, Any]]] = {}
@@ -865,18 +851,10 @@ def _select_candidates(
             continue
         # Disc-source reject: DVDR/DVD-R means an untouched disc dump (a raw
         # .img/.iso, or VIDEO_TS with no single playable file) — reject by
-        # name outright, since a release reported as an opaque whole-folder
-        # hub result (the common case) has no individually-listed files for
-        # the extension check below to catch at all.
+        # name outright, since a whole-folder hub result has no file listing
+        # to check.
         if is_disc_source_release(release_name):
             log.debug("poll %s: skip %r — disc source (DVDR)", item_id, release_name)
-            continue
-        # Disc-image reject: a DVDR release shipped as a single .img/.iso file
-        # isn't playable in Emby without mounting/extraction, unlike a
-        # VIDEO_TS-structured DVDR release (no .img/.iso files, so unaffected).
-        # Only reachable when the hub DID list individual files (see above).
-        if has_rejected_extension(g["files"], cfg.filters.reject_extensions):
-            log.debug("poll %s: skip %r — disc image file (.img/.iso)", item_id, release_name)
             continue
         # Adult-content reject: scene porn is tagged XXX and often shares a
         # word with a real title (e.g. "Roccos.World.Feet.Obsession.2.XXX").
@@ -1051,115 +1029,34 @@ async def _queue_candidates(
             ),
         )
         release_name: str = best["release_name"]
-        release_hub_path: str = best["parent_dir"]  # e.g. /TV/Drama/<release>
 
         # Season layer for TV (sonarr's seasonFolderFormat is "Season.{season}"
         # — dot, not space). Movies go straight under the movie root.
         if kind == "tv":
             season_num = season_of_episode_key(key) or 0
-            release_root_smb = target_base_smb + f"Season.{season_num}\\" + release_name + "\\"
             parent_for_folder = target_base_smb + f"Season.{season_num}\\"
         else:
-            release_root_smb = target_base_smb + release_name + "\\"
             parent_for_folder = target_base_smb
 
-        # Whole-folder path: when the hub gave a directory result for this
-        # release, queue the entire folder by its id into the PARENT dir.
-        # AirDC++ recreates the release folder under the parent, so we pass
-        # the parent (not release_root_smb) to avoid a name/name nest.
-        if best.get("dir_id"):
-            resp = await ad.queue_result(iid, best["dir_id"], parent_for_folder)
-            if resp is not None:
-                bid = (resp.get("bundle_info") or {}).get("id")
-                if kind == "movie":  # TV done-ness comes from hasFile/finish, not queue time
-                    await state.mark_completed(
-                        item_id, key, str(bid) if bid else None, release_name
-                    )
-                queued += 1
-                log.info(
-                    "queue %s key=%s folder=%r -> %s OK (whole folder)",
-                    item_id, key, release_name, parent_for_folder,
-                )
-            else:
-                log.warning(
-                    "queue %s key=%s folder=%r -> failed",
-                    item_id, key, release_name,
-                )
-            continue
-
-        # Secondary search by the full release name to capture EVERYTHING
-        # in the release folder (the broad show search only returns the
-        # top-relevance .r0X parts; sample folders + .sfv usually drop off
-        # the per-hub result limit). Then queue every file under the release
-        # path, preserving its sub-directory (Sample/, etc.) under the
-        # destination so the on-disk layout mirrors the hub layout.
-        iid2 = await ad.create_search_instance()
-        secondary_files: list[dict] = []
-        try:
-            if iid2 is not None and await ad.hub_search(iid2, release_name, extensions=None):
-                await asyncio.sleep(8.0)
-                rs2 = await ad.get_results(iid2, 0, 300)
-                for r in rs2:
-                    if _is_directory_result(r):
-                        continue
-                    p = r.get("path") or ""
-                    if p.startswith(release_hub_path + _HUB_PATH_SEP) or p == release_hub_path:
-                        secondary_files.append(r)
-        finally:
-            if iid2 is not None:
-                try:
-                    await ad.delete_instance(iid2)
-                except Exception:
-                    pass
-
-        # If the secondary search didn't return anything (rare), fall back
-        # to the files we already grouped from the primary sweep.
-        files_to_queue = secondary_files or best["files"]
-        log.info(
-            "queue %s key=%s release=%r files=%d (primary=%d secondary=%d) root=%s",
-            item_id,
-            key,
-            release_name,
-            len(files_to_queue),
-            len(best["files"]),
-            len(secondary_files),
-            release_root_smb,
-        )
-
-        queued_files = 0
-        last_bundle_id: Optional[str] = None
-        seen_tths: set[str] = set()  # in-poll dedup vs the same TTH on multiple hubs
-        for f in files_to_queue:
-            tth = f.get("tth")
-            if not tth or tth in seen_tths:
-                continue
-            seen_tths.add(tth)
-            # Compute the destination for this specific file: release_root +
-            # whatever sub-path the file sits at inside the release folder.
-            file_path = f.get("path") or ""
-            target_for_file = release_root_smb
-            if file_path.startswith(release_hub_path + _HUB_PATH_SEP):
-                sub = file_path[len(release_hub_path) + 1:]
-                sub_dir = sub.rsplit(_HUB_PATH_SEP, 1)[0] if _HUB_PATH_SEP in sub else ""
-                if sub_dir:
-                    target_for_file = release_root_smb + sub_dir.replace(_HUB_PATH_SEP, "\\") + "\\"
-            resp = await ad.queue_result(iid, tth, target_for_file)
-            if resp is not None:
-                queued_files += 1
-                bi = (resp.get("bundle_info") or {}).get("id")
-                if bi:
-                    last_bundle_id = str(bi)
-        if queued_files:
+        # Queue the entire release folder by its directory id into the PARENT
+        # dir. AirDC++ recreates the release folder under the parent, so we
+        # pass the parent (not the release folder) to avoid a name/name nest.
+        resp = await ad.queue_result(iid, best["dir_id"], parent_for_folder)
+        if resp is not None:
+            bid = (resp.get("bundle_info") or {}).get("id")
             if kind == "movie":  # TV done-ness comes from hasFile/finish, not queue time
                 await state.mark_completed(
-                    item_id, key, last_bundle_id, release_name
+                    item_id, key, str(bid) if bid else None, release_name
                 )
             queued += 1
             log.info(
-                "queue %s key=%s OK (%d files queued)",
-                item_id,
-                key,
-                queued_files,
+                "queue %s key=%s folder=%r -> %s OK (whole folder)",
+                item_id, key, release_name, parent_for_folder,
+            )
+        else:
+            log.warning(
+                "queue %s key=%s folder=%r -> failed",
+                item_id, key, release_name,
             )
     return queued
 

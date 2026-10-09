@@ -88,20 +88,6 @@ def _try_smb(fs_path: str, mapping: PathMap) -> Optional[str]:
         return None
 
 
-def _parent_dir_and_name(path: str) -> tuple[str, str]:
-    """Given a result.path like '/TV/Drama/Show.S03/Show.S03E01.RELEASE/file.rar',
-    return (parent_dir, release_folder_name) = ('/TV/Drama/Show.S03/Show.S03E01.RELEASE',
-    'Show.S03E01.RELEASE'). The parent_dir doubles as the grouping key so all files
-    belonging to one release fall into the same bucket.
-    """
-    parts = [p for p in path.split(_HUB_PATH_SEP) if p]
-    if len(parts) < 2:
-        return "", ""
-    release_folder = parts[-2]
-    parent_dir = _HUB_PATH_SEP + _HUB_PATH_SEP.join(parts[:-1])
-    return parent_dir, release_folder
-
-
 def _to_smb_dir(fs_dir: str, mapping: PathMap) -> str:
     """fs path -> SMB directory with required trailing backslash."""
     smb = fs_to_smb(fs_dir, mapping)

@@ -1,6 +1,5 @@
-"""Tests for AirDCPP.search_release_candidates — directory-results-first
-hub search with a fallback to unrestricted (any file type) when the
-directory-scoped attempt comes back completely empty. _retry_on_401 is
+"""Tests for AirDCPP.search_release_candidates — directory-only hub search
+(never falls back to file results). _retry_on_401 is
 monkeypatched to simulate the AirDC++ webapi rather than hitting a real
 hub, same convention as test_search_rate_limit.py.
 """
@@ -58,7 +57,7 @@ class Recorder:
         raise AssertionError(f"unexpected {method} {path}")
 
 
-def test_searches_directory_first_and_returns_those_results_when_non_empty():
+def test_searches_directories_only():
     ad = _client()
     rec = Recorder({"directory": [{"name": "Some.Movie.2020-GROUP"}], None: [{"name": "should not be used"}]})
     ad._retry_on_401 = rec
@@ -66,72 +65,31 @@ def test_searches_directory_first_and_returns_those_results_when_non_empty():
     iid, results = asyncio.run(ad.search_release_candidates("Some Movie 2020", wait=0))
 
     assert results == [{"name": "Some.Movie.2020-GROUP"}]
-    assert rec.dispatched == [("Some Movie 2020", "directory")]  # no fallback needed
+    assert rec.dispatched == [("Some Movie 2020", "directory")]
     assert iid is not None
     assert rec.deleted_instances == []  # success path — caller owns deleting it
 
 
-def test_falls_back_to_unrestricted_search_when_directory_is_empty():
+def test_no_file_fallback_when_directories_are_empty():
     ad = _client()
     rec = Recorder({"directory": [], None: [{"name": "Loose.File.Only.Release.2020.mkv"}]})
     ad._retry_on_401 = rec
 
     iid, results = asyncio.run(ad.search_release_candidates("Some Show S01E01", wait=0))
 
-    assert results == [{"name": "Loose.File.Only.Release.2020.mkv"}]
-    assert rec.dispatched == [("Some Show S01E01", "directory"), ("Some Show S01E01", None)]
-    assert iid is not None
-    assert rec.deleted_instances == [1]  # the empty directory-only instance was cleaned up
-
-
-def test_both_attempts_empty_returns_no_results_but_a_live_instance():
-    ad = _client()
-    rec = Recorder({"directory": [], None: []})
-    ad._retry_on_401 = rec
-
-    iid, results = asyncio.run(ad.search_release_candidates("Nothing Ever Found", wait=0))
-
     assert results == []
     assert iid is not None  # still a real, caller-owned instance — not a failure
-    assert rec.dispatched == [("Nothing Ever Found", "directory"), ("Nothing Ever Found", None)]
+    assert rec.dispatched == [("Some Show S01E01", "directory")]
 
 
-def test_extensions_are_passed_through_on_both_attempts():
+def test_extensions_are_passed_through():
     ad = _client()
-    rec = Recorder({"directory": [], None: [{"name": "x"}]})
+    rec = Recorder({"directory": [{"name": "x"}]})
     ad._retry_on_401 = rec
 
     asyncio.run(ad.search_release_candidates("Query", wait=0, extensions=["mkv", "avi"]))
 
-    assert rec.dispatched_extensions == [["mkv", "avi"], ["mkv", "avi"]]
-
-
-def test_dispatch_failure_on_the_directory_attempt_still_tries_the_fallback():
-    # The directory-scoped dispatch itself fails outright (e.g. a transient
-    # hub error) — that instance is discarded and a fresh one is used for
-    # the unrestricted retry, same as an empty-results outcome would.
-    ad = _client()
-    calls = {"n": 0}
-
-    async def flaky(method, path, **kw):
-        if method == "POST" and path == "/api/v1/search":
-            calls["n"] += 1
-            return _resp(200, {"id": calls["n"]})
-        if method == "POST" and path.endswith("/hub_search"):
-            body = kw["json"]["query"]
-            if body.get("file_type") == "directory":
-                return _resp(500, {})  # the directory-scoped dispatch fails
-            return _resp(200, {})
-        if method == "GET" and "/results/" in path:
-            return _resp(200, [{"name": "found-on-retry"}])
-        if method == "DELETE":
-            return _resp(200, {})
-        raise AssertionError(f"unexpected {method} {path}")
-
-    ad._retry_on_401 = flaky
-    iid, results = asyncio.run(ad.search_release_candidates("Query", wait=0))
-    assert iid == 2  # the second (fallback) instance, not the discarded first
-    assert results == [{"name": "found-on-retry"}]
+    assert rec.dispatched_extensions == [["mkv", "avi"]]
 
 
 def test_instance_creation_failure_on_the_first_attempt_is_a_clean_failure():
@@ -152,7 +110,7 @@ def test_instance_creation_failure_on_the_first_attempt_is_a_clean_failure():
     assert results == []
 
 
-def test_dispatch_failure_on_both_attempts_returns_none():
+def test_dispatch_failure_returns_none_and_cleans_up():
     ad = _client()
 
     async def always_fail_dispatch(method, path, **kw):

@@ -17,7 +17,8 @@ class FakeAirDCPP:
     async def create_search_instance(self):
         return 1 if self._create_instance_ok else None
 
-    async def hub_search(self, iid, query, extensions=None):
+    async def hub_search(self, iid, query, extensions=None, file_type=None):
+        self.file_types = getattr(self, "file_types", []) + [file_type]
         return self._hub_search_ok
 
     async def get_results(self, iid, start, count):
@@ -65,6 +66,7 @@ def test_exact_name_directory_match_is_queued_as_a_whole_folder():
     assert outcome["ok"] is True
     assert outcome["queued"] == ["some.release-group.r42", "some.release-group.r58"]
     assert outcome["not_found"] == []
+    assert ad.file_types == ["directory"]
     # Target is the release's PARENT dir — AirDC++ appends the result's own
     # folder name itself. Passing the release dir itself (the old bug) made
     # AirDC++ nest a full duplicate copy inside the existing folder instead

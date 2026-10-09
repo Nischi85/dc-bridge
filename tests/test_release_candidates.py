@@ -106,20 +106,14 @@ class FakeAd:
         return {"bundle_info": {"id": 999}}
 
     async def search_release_candidates(self, pattern, wait, extensions=None):
-        # Mirrors dcbridge.airdcpp.AirDCPP.search_release_candidates against
-        # these same fakes, so tests exercise the real directory-first /
-        # fallback-to-any control flow rather than a stubbed shortcut.
+        # Mirrors dcbridge.airdcpp.AirDCPP.search_release_candidates
+        # (directory-only) against these same fakes.
         iid = await self.create_search_instance()
-        if await self.hub_search(iid, pattern, extensions=extensions, file_type="directory"):
-            results = await self.get_results(iid, 0, 500)
-            if results:
-                return iid, results
-        await self.delete_instance(iid)
-        iid = await self.create_search_instance()
-        if not await self.hub_search(iid, pattern, extensions=extensions):
+        if not await self.hub_search(iid, pattern, extensions=extensions, file_type="directory"):
             await self.delete_instance(iid)
             return None, []
         return iid, await self.get_results(iid, 0, 500)
+
 
 
 class FakeState:
@@ -168,30 +162,27 @@ def test_lists_every_passing_release_scored_and_sorted(monkeypatch):
     }
 
 
-def test_listing_searches_directories_first(monkeypatch):
-    # Directory-type results need none of the loose-file parent-dir
-    # grouping a plain file hit does — fewer, cleaner candidates in the
-    # common case (measured live against a real hub: an unrestricted
-    # "Chernobyl" search returned a 331/169 directory/file mix at the
-    # result cap; the same search with file_type=directory returned 500
-    # clean release folders).
+def test_listing_searches_directories_only(monkeypatch):
     results = [_dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1")]
     ad = FakeAd(results)
     asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
-    assert ad.hub_search_file_types == ["directory"]  # found on the first, directory-scoped attempt — no fallback needed
+    assert ad.hub_search_file_types == ["directory"]
 
 
-def test_listing_falls_back_to_any_type_when_directory_search_is_empty(monkeypatch):
-    # Some hubs/some content only ever surfaces as individual file hits,
-    # never a directory listing — the exact case dc-bridge's own
-    # _select_candidates grouping-by-parent-dir logic exists for. A
-    # directory-only search finding nothing must not be treated as "no
-    # candidates" outright.
+def test_listing_never_falls_back_to_file_results(monkeypatch):
     results = [_dir_result("Some.Movie.2020.1080p.BluRay.x264-GOOD", "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/", 8000, "d1")]
     ad = FakeAd(results, directory_empty=True)
     out = asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
-    assert len(out) == 1
-    assert ad.hub_search_file_types == ["directory", None]  # fell back after the first came back empty
+    assert out == []
+    assert set(ad.hub_search_file_types) == {"directory"}
+
+
+def test_loose_file_results_are_ignored():
+    files = [{"type": {"id": "file", "str": "mkv"}, "name": "some.movie.2020.1080p.bluray.x264-good.mkv",
+              "path": "/Movies/Some.Movie.2020.1080p.BluRay.x264-GOOD/some.movie.2020.1080p.bluray.x264-good.mkv",
+              "tth": "T1", "size": 8000 * 1024 * 1024}]
+    item = _movie_item()
+    assert poller._select_candidates(files, "movie", item["title"], item, _cfg(), [], {"movie"}, item["id"]) == {}
 
 
 def test_rejects_a_release_that_fails_the_normal_guards(monkeypatch):
@@ -225,9 +216,8 @@ def test_empty_hub_search_returns_no_candidates(monkeypatch):
     ad.hub_search = fake_hub_search
     out = asyncio.run(poller.list_release_candidates(_cfg(), ad, _movie_item(), "movie", wait=0))
     assert out == []
-    # directory-scoped dispatch fails -> instance 1 discarded, fallback
-    # dispatch on a fresh instance 2 also fails -> both cleaned up.
-    assert ad.instances_deleted == [1, 2]
+    # The failed dispatch's instance is cleaned up; no second search.
+    assert ad.instances_deleted == [1]
 
 
 def test_a_second_listing_for_the_same_item_and_key_evicts_the_first_instance(monkeypatch):

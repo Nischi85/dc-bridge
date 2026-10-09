@@ -108,7 +108,7 @@ async def repair_release(
         }
 
     try:
-        if not await ad.hub_search(iid, query, extensions=None):
+        if not await ad.hub_search(iid, query, extensions=None, file_type="directory"):
             return {"ok": False, "error": "hub search failed", "queued": [], "not_found": list(missing_files)}
         await asyncio.sleep(settle_seconds)
         results = await ad.get_results(iid, 0, 500)

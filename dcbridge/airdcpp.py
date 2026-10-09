@@ -164,40 +164,19 @@ class AirDCPP:
     async def search_release_candidates(
         self, pattern: str, wait: float, extensions: Optional[list[str]] = None,
     ) -> tuple[Optional[int], list[dict]]:
-        """One release search, directory results preferred: AirDC++'s
-        file_type="directory" first — a release-folder hit is unambiguous
-        and needs none of the loose-file parent-dir grouping a plain file
-        hit does, so this is both fewer and more directly usable results in
-        the common case (measured live: an unrestricted "Chernobyl" search
-        returned 331 directory + 169 loose-file hits at the 500 cap; the
-        same search with file_type=directory returned 500 clean release
-        folders). Only retries WITHOUT that restriction if the directory-
-        scoped attempt comes back completely empty — some hubs/some content
-        only ever surfaces as individual file hits, never a directory
-        listing (see dcbridge.poller._select_candidates' own comment on
-        this), so a genuinely file-only-indexed release still gets found —
-        at the cost of one extra search, only in that one case.
+        """One release search, directories only (file_type="directory") —
+        scene releases are always whole folders, so a loose-file hit is never
+        queued.
 
         Returns (instance_id, results). instance_id is None (results
         always []) if a search instance couldn't be created, or the hub
-        search itself failed outright on both attempts. The caller owns
-        deleting whichever instance comes back once done reading its
-        results — this never deletes on the success path, since the caller
-        still needs the live instance to queue against a result's tth."""
+        search itself failed. The caller owns deleting the instance once
+        done reading its results — this never deletes on the success path,
+        since the caller still needs the live instance to queue a result."""
         iid = await self.create_search_instance()
         if iid is None:
             return None, []
-        if await self.hub_search(iid, pattern, extensions=extensions, file_type="directory"):
-            await asyncio.sleep(wait)
-            results = await self.get_results(iid, 0, 500)
-            if results:
-                return iid, results
-        await self.delete_instance(iid)
-
-        iid = await self.create_search_instance()
-        if iid is None:
-            return None, []
-        if not await self.hub_search(iid, pattern, extensions=extensions):
+        if not await self.hub_search(iid, pattern, extensions=extensions, file_type="directory"):
             await self.delete_instance(iid)
             return None, []
         await asyncio.sleep(wait)

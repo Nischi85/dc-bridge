@@ -47,11 +47,10 @@ because it's about matching *correctly*, not taste.
   adult/porn tags (`reject_adult_tags`). A tag you don't list is kept; an empty
   list disables that filter. Matching is whole-token within the scene-tag block
   after the year/episode marker, so a language word in a *title* (e.g.
-  `The.Danish.Girl`) is never mistaken for a tag. `reject_extensions`
-  (default `[img, iso]`) rejects a release if any file a hub lists for it ends
-  in one of these — e.g. a DVDR shipped as a single disc image instead of
-  playable video files. Only sees files a hub actually lists individually; a
-  release reported only as an opaque whole-folder result can't be checked.
+  `The.Danish.Girl`) is never mistaken for a tag. DVDR (disc-dump) releases
+  are rejected by name.
+- **Directory-only search** — every hub search asks for directories only, and
+  each release is queued as a whole folder; loose file hits are never used.
 - **Match preferences** (`match:`) — `grab_specials` (include Season 0
   specials/OVAs, default off), `year_tolerance` (how far a movie's year, or a
   TV release's year if it carries one, may differ from the request/episode's

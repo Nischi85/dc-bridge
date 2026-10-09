@@ -206,10 +206,11 @@ def make_app(cfg: Config) -> FastAPI:
         }
 
     @app.get("/airdcpp/probe")
-    async def airdcpp_probe(q: str = "Example.Show.S01", wait: float = 8.0):
+    async def airdcpp_probe(q: str = "Example.Show.S01", wait: float = 8.0, file_type: Optional[str] = "directory"):
         """Drive a full search round-trip (create instance, hub_search, wait, get
         results) and return a compact preview. Does NOT queue downloads. Use for
         sanity-checking what AirDC++ returns for a given query/quality settings.
+        Directories only by default, like real searches; file_type= (empty) for any type.
         """
         ad: AirDCPP = app.state.airdcpp
         await ad.ensure_auth()
@@ -217,7 +218,7 @@ def make_app(cfg: Config) -> FastAPI:
         if iid is None:
             return {"error": "create_search_instance failed"}
         try:
-            await ad.hub_search(iid, q, extensions=None)
+            await ad.hub_search(iid, q, extensions=None, file_type=file_type or None)
             await asyncio.sleep(wait)
             results = await ad.get_results(iid, 0, 100)
         finally:

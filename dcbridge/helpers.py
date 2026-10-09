@@ -333,12 +333,8 @@ def is_disc_source_release(name: str) -> bool:
     playable video — Emby can't play these directly. Seen live: Underworld:
     Rise of the Lycans grabbed as 'Underworld.Rise.Of.The.Lycans.MULTISUBS.
     PAL.DVDR-CONDITION', which extracted to a single unplayable .img file.
-    has_rejected_extension (filters.reject_extensions, e.g. .img/.iso) is
-    the other half of this guard, but it can only see files a hub actually
-    listed individually — a release reported as an opaque whole-folder
-    result (the common/preferred case, so AirDC++ pulls it intact) has no
-    files to check there at all. This name-based check catches that blind
-    spot outright, before anything downloads."""
+    Searches return whole-folder results with no file listing, so the name
+    is the only thing to check before anything downloads."""
     return bool(_DISC_SOURCE_RE.search(name))
 
 
@@ -440,22 +436,6 @@ def has_unwanted_subs(name: str) -> bool:
     filters.reject_sub_tags). Scans only the scene-tag block after the year/episode
     marker, like is_foreign_language."""
     return _FOREIGN_SUBS_RE.search(_scene_tag_region(name)) is not None
-
-
-def has_rejected_extension(files: list[dict], extensions: list[str]) -> bool:
-    """True if any file in `files` (raw hub result dicts for one release group)
-    ends with one of `extensions` (filters.reject_extensions), e.g. a DVDR
-    release shipped as a single .img/.iso disc image instead of playable video
-    files. Only sees files a hub actually listed individually — a release
-    reported ONLY as an opaque whole-folder result can't be checked this way."""
-    if not extensions:
-        return False
-    exts = tuple(f".{e.lstrip('.').lower()}" for e in extensions)
-    for f in files:
-        path = (f.get("path") or f.get("name") or "").lower()
-        if path.endswith(exts):
-            return True
-    return False
 
 
 _TITLE_SPLIT_RE = re.compile(r"[^a-z0-9]+")
