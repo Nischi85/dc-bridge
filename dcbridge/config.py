@@ -310,6 +310,10 @@ class MatchCfg(BaseModel):
     # them apart — Sonarr reported originalLanguage=English for the Swedish
     # 2005 series, so automatic detection isn't an option here.
     require_release_tags: dict[str, list[str]] = Field(default_factory=dict)
+    # Single-season series (miniseries): treat a "Part N" release
+    # ("Title.1989.Part1.1080p...") as S01E0N and search "<title> Part" when the
+    # SxxExx searches find nothing.
+    miniseries_part_numbering: bool = True
 
 
 class Config(BaseModel):

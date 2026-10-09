@@ -24,6 +24,8 @@ from dcbridge.helpers import (
     _utc_iso,
     compute_cadence,
     episode_keys_from_name,
+    is_single_season,
+    part_episode_keys,
     has_preferred_language,
     has_rejected_extension,
     has_unwanted_subs,
@@ -785,6 +787,15 @@ async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) 
     return invalidated
 
 
+def _part_numbering_applies(cfg: Config, item: dict, needed_keys) -> bool:
+    """match.miniseries_part_numbering for a single-season series. Season info
+    comes from the episode list sync stores; the needed keys stand in before
+    the first sync."""
+    if not cfg.match.miniseries_part_numbering:
+        return False
+    return is_single_season(list((item.get("episode_air_years") or {}).keys()) or list(needed_keys))
+
+
 def _select_candidates(
     results: list[dict], kind: str, title: str, item: dict, cfg: Config,
     item_priority: list[str], needed_keys: set[str], item_id: str,
@@ -841,6 +852,7 @@ def _select_candidates(
 
     # Evaluate each release-folder group as a candidate.
     candidates_by_key: dict[str, list[dict[str, Any]]] = {}
+    part_mode = kind == "tv" and _part_numbering_applies(cfg, item, needed_keys)
     for parent_dir, g in groups.items():
         release_name = g["release_name"]
         total_size = g["total_size"]
@@ -954,6 +966,11 @@ def _select_candidates(
                 )
                 continue
             eks = episode_keys_from_name(release_name)
+            if not eks and part_mode and tv_release_extra_words_ok(
+                release_name, title, item.get("year"),
+                cfg.match.year_tolerance, cfg.match.loose_trailing_s, part_marker=True,
+            ):
+                eks = part_episode_keys(release_name)
             if not eks:
                 continue
             for ek in eks:
@@ -1228,6 +1245,18 @@ async def _search_listing_variant(
     groups = _select_candidates(
         results, item["kind"], title_variant, item, cfg, item_priority, {key}, item["id"],
     ).get(key, [])
+    if not groups and item["kind"] == "tv" and _part_numbering_applies(cfg, item, {key}):
+        # Miniseries "Part N" naming — see the same fallback in poll_item.
+        try:
+            await ad.delete_instance(iid)
+        except Exception:
+            log.debug("delete_instance %s failed (ignored)", iid)
+        iid, results = await ad.search_release_candidates(f"{title_query} Part", wait)
+        if iid is None:
+            return None, 0, []
+        groups = _select_candidates(
+            results, item["kind"], title_variant, item, cfg, item_priority, {key}, item["id"],
+        ).get(key, [])
     return iid, len(results), groups
 
 
@@ -1704,6 +1733,7 @@ async def _poll_item(
         ep_title_variants += rank_alt_titles(title, list(item.get("alt_titles") or []))[
             : max(0, cfg.poller.alt_title_search_limit)
         ]
+        found_keys: set[str] = set()
         for idx, ek in enumerate(batch):
             exclude = await state.get_failed_releases(item_id, ek)
             for vi, title_variant in enumerate(ep_title_variants):
@@ -1721,6 +1751,7 @@ async def _poll_item(
                         require_year=(title_variant == ep_short_title),
                     )
                     if candidates_by_key:
+                        found_keys.add(ek)
                         if vi > 0:
                             log.info("poll %s: %s matched via alternate title %r",
                                      item_id, ek, title_variant)
@@ -1741,6 +1772,37 @@ async def _poll_item(
                     await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
             if idx < len(batch) - 1:
                 await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
+        part_keys = set(batch) - found_keys
+        if part_keys and _part_numbering_applies(cfg, item, needed_keys):
+            # Miniseries named "Title.Part1..." never match an SxxExx query —
+            # one "<title> Part" search covers every remaining episode.
+            await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
+            part_iid, results = await ad.search_release_candidates(
+                f"{query} Part", cfg.poller.tv_search_settle_seconds,
+            )
+            if part_iid is not None:
+                try:
+                    total_results += len(results)
+                    exclude = set()
+                    for k in part_keys:
+                        exclude |= await state.get_failed_releases(item_id, k)
+                    candidates_by_key = _select_candidates(
+                        results, kind, title, item, cfg, item_priority, part_keys, item_id,
+                        exclude_releases=exclude,
+                    )
+                    if candidates_by_key:
+                        log.info("poll %s: %s matched via \"Part N\" naming",
+                                 item_id, ",".join(sorted(candidates_by_key)))
+                        queued += await _queue_candidates(
+                            ad, state, cfg, part_iid, kind, item_id,
+                            candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+                            lang_priority,
+                        )
+                finally:
+                    try:
+                        await ad.delete_instance(part_iid)
+                    except Exception:
+                        log.debug("delete_instance %s failed (ignored)", part_iid)
         log.info("poll %s: searched %d episode(s), %d hub result(s), queued %d",
                  item_id, len(batch), total_results, queued)
         # Fruitless-drain backoff: a 'draining' item that keeps searching and

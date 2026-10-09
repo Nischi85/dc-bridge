@@ -142,6 +142,25 @@ def episode_keys_from_name(name: str) -> list[str]:
     return [f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}" for m in _EPISODE_RE.finditer(name)]
 
 
+# "Part N" naming some miniseries releases use instead of SxxExx
+# ("Lonesome.Dove.1989.Part1.1080p..."). A range ("Part.1-4") is a pack, not a part.
+_PART_RE = re.compile(r"\bpart[. _]?(\d{1,2})(?!\d|-\d)", re.I)
+_PART_TOKEN_RE = re.compile(r"part\d{0,2}")
+
+
+def part_episode_keys(name: str) -> list[str]:
+    """['S01E03'] for a "Part 3" release name, [] otherwise. Only meaningful for
+    a single-season series (see is_single_season)."""
+    m = _PART_RE.search(name)
+    return [f"S01E{int(m.group(1)):02d}"] if m else []
+
+
+def is_single_season(episode_keys) -> bool:
+    """True when every non-special episode key is in season 1 (a miniseries)."""
+    seasons = {season_of_episode_key(k) for k in episode_keys} - {0, None}
+    return seasons == {1}
+
+
 def season_of_episode_key(key: str) -> Optional[int]:
     """The season number of a 'SxxExx' key (e.g. "S05E01" -> 5), or None."""
     m = re.match(r"S(\d{1,2})E\d", key, re.I)
@@ -503,7 +522,7 @@ def release_matches_title(release_name: str, title: str, anchored: bool = False)
 
 def tv_release_extra_words_ok(
     release_name: str, title: str, year: Optional[int],
-    tolerance: int = 1, loose_trailing_s: bool = True,
+    tolerance: int = 1, loose_trailing_s: bool = True, part_marker: bool = False,
 ) -> bool:
     """Reject a same-titled DIFFERENT series wearing this series' name.
 
@@ -521,14 +540,16 @@ def tv_release_extra_words_ok(
     the 2005 series) or any other word is rejected. A season-subtitle year that
     IS part of the franchise name (e.g. 'American.Horror.Story.1984.S09E01')
     still matches via its alternate title, whose tokens include the year.
-    Permissive when the release has no SxxExx token or the title is empty."""
+    Permissive when the release has no SxxExx token or the title is empty.
+    part_marker=True uses a "Part"/"PartN" token as the marker instead of SxxExx."""
     want = _title_tokens(title)
     if not want:
         return True
     rel = [t for t in _TITLE_SPLIT_RE.split(to_ascii(release_name).lower()) if t]
     if len(rel) > 1 and rel[0] in _LEADING_ARTICLES:
         rel = rel[1:]
-    mi = next((i for i, t in enumerate(rel) if _EPISODE_RE.fullmatch(t)), None)
+    marker_re = _PART_TOKEN_RE if part_marker else _EPISODE_RE
+    mi = next((i for i, t in enumerate(rel) if marker_re.fullmatch(t)), None)
     if mi is None:
         return True
     n = 0

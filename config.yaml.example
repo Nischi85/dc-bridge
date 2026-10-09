@@ -291,6 +291,9 @@ match:
   # releases land around the digital date; raise this if they tend to appear later.
   # 0 = search from the release date. Fractions allowed (0.5 = 12h).
   movie_release_offset_days: 0
+  # Single-season series (miniseries): treat a "Part N" release
+  # ("Title.1989.Part1.1080p...") as S01E0N; searches "<title> Part" when SxxExx finds nothing.
+  miniseries_part_numbering: true
   # Per-item required release tag(s), keyed by the bridge's item id (as shown
   # in its log lines, e.g. "sonarr:845"). A release for that item must carry
   # at least one listed tag or it's rejected — for a title that collides with
