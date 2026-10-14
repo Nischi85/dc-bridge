@@ -64,7 +64,12 @@ because it's about matching *correctly*, not taste.
   the bridge's item id, e.g. `"sonarr:845": ["SWEDiSH"]` — for a title that
   collides with a differently-produced same-named show that *arr's own
   metadata can't tell apart; empty by default, a no-op until you add an
-  entry).
+  entry), and `extra_search_titles` (per-item extra hub search titles, same
+  keying — for something released under a title *arr doesn't know, e.g.
+  `"sonarr:646": ["Vi på Saltkråkan"]` for *Life on Seacrow Island*; tried
+  before the canonical title). `miniseries_part_numbering` (default on)
+  maps a single-season series' "Part N" and bare "EN" releases
+  ("Title.E01.SWEDiSH...") to S01E0N.
 
 The bridge also won't search content before it exists: a TV episode is gated
 until it airs (`poller.air_offset_hours`), and a movie until its release date

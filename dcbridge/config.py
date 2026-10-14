@@ -304,9 +304,15 @@ class MatchCfg(BaseModel):
     # them apart — Sonarr reported originalLanguage=English for the Swedish
     # 2005 series, so automatic detection isn't an option here.
     require_release_tags: dict[str, list[str]] = Field(default_factory=dict)
-    # Single-season series (miniseries): treat a "Part N" release
-    # ("Title.1989.Part1.1080p...") as S01E0N and search "<title> Part" when the
-    # SxxExx searches find nothing.
+    # Per-item extra hub search titles, keyed by item id like the above — for a
+    # series/movie released under a title *arr doesn't know (e.g. the original
+    # Swedish "Vi pa Saltkrakan" for "Life on Seacrow Island", whose TMDB alt
+    # titles only carry a German one). Tried FIRST, before the canonical title
+    # and the TMDB alt titles, and not counted against alt_title_search_limit.
+    extra_search_titles: dict[str, list[str]] = Field(default_factory=dict)
+    # Single-season series (miniseries): treat a "Part N" or bare "EN" release
+    # ("Title.1989.Part1.1080p...", "Title.E01.SWEDiSH...") as S01E0N, and search
+    # the bare title (then "<title> Part") when the SxxExx searches find nothing.
     miniseries_part_numbering: bool = True
 
 

@@ -364,3 +364,64 @@ def test_select_falls_back_when_the_cached_entry_has_expired(monkeypatch):
     ))
     assert queued == 1
     assert len(ad.hub_searches) == 2  # cache was too old to trust — re-searched
+
+
+# ── list_season_candidates ───────────────────────────────────────────────
+
+def _season_results():
+    return [
+        _dir_result("Some.Show.S01E01.1080p.WEB.x264-GROUP", "/TV/Some.Show.S01E01.1080p.WEB.x264-GROUP/", 2000, "e1a"),
+        _dir_result("Some.Show.S01E01.720p.HDTV.x264-OTHER", "/TV/Some.Show.S01E01.720p.HDTV.x264-OTHER/", 900, "e1b"),
+        _dir_result("Some.Show.S01E02.720p.HDTV.x264-OTHER", "/TV/Some.Show.S01E02.720p.HDTV.x264-OTHER/", 900, "e2b"),
+        # not asked for — must not show up
+        _dir_result("Some.Show.S01E07.720p.HDTV.x264-OTHER", "/TV/Some.Show.S01E07.720p.HDTV.x264-OTHER/", 900, "e7b"),
+    ]
+
+
+def test_season_listing_is_one_search_grouped_by_episode():
+    ad = FakeAd(_season_results())
+    out = asyncio.run(poller.list_season_candidates(
+        _cfg(), ad, _tv_item(), 1, ["S01E01", "S01E02", "S01E03"], wait=0))
+    assert len(ad.hub_searches) == 1
+    assert ad.hub_searches[0].endswith("S01E")
+    assert ad.hub_search_file_types == ["directory"]
+    assert sorted(out) == ["S01E01", "S01E02"]  # S01E03 had nothing, S01E07 wasn't asked for
+    assert [c["release_name"] for c in out["S01E01"]] == [
+        "Some.Show.S01E01.1080p.WEB.x264-GROUP", "Some.Show.S01E01.720p.HDTV.x264-OTHER",
+    ]
+
+
+def test_season_listing_caches_one_shared_instance_per_episode_key():
+    ad = FakeAd(_season_results())
+    asyncio.run(poller.list_season_candidates(_cfg(), ad, _tv_item(), 1, ["S01E01", "S01E02"], wait=0))
+    iids = {poller._CANDIDATE_CACHE[k]["iid"] for k in ("sonarr:9:S01E01", "sonarr:9:S01E02")}
+    assert len(iids) == 1
+    assert ad.instances_deleted == []
+
+
+def test_selecting_episodes_from_a_season_listing_reuses_the_shared_instance():
+    ad = FakeAd(_season_results())
+    state = FakeState()
+    asyncio.run(poller.list_season_candidates(_cfg(), ad, _tv_item(), 1, ["S01E01", "S01E02"], wait=0))
+    shared = poller._CANDIDATE_CACHE["sonarr:9:S01E01"]["iid"]
+
+    q1 = asyncio.run(poller.select_release(
+        _cfg(), state, ad, _tv_item(), "S01E01", "Some.Show.S01E01.720p.HDTV.x264-OTHER"))
+    # still referenced by S01E02's entry -> must stay open
+    assert q1 == 1 and ad.instances_deleted == []
+
+    q2 = asyncio.run(poller.select_release(
+        _cfg(), state, ad, _tv_item(), "S01E02", "Some.Show.S01E02.720p.HDTV.x264-OTHER"))
+    assert q2 == 1
+    assert len(ad.hub_searches) == 1  # neither select re-searched
+    assert ad.instances_deleted == [shared]  # closed once the last entry is spent
+    assert [q[0] for q in ad.queued] == ["e1b", "e2b"]
+
+
+def test_season_listing_with_nothing_passing_returns_empty_and_cleans_up():
+    ad = FakeAd([])
+    out = asyncio.run(poller.list_season_candidates(_cfg(), ad, _tv_item(), 1, ["S01E01"], wait=0))
+    assert out == {}
+    # every instance opened (incl. a miniseries "Part" fallback search) is closed
+    assert sorted(ad.instances_deleted) == list(range(1, ad._next_iid + 1))
+    assert poller._CANDIDATE_CACHE == {}

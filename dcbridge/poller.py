@@ -25,7 +25,7 @@ from dcbridge.helpers import (
     compute_cadence,
     episode_keys_from_name,
     is_single_season,
-    part_episode_keys,
+    single_season_episode_keys,
     has_preferred_language,
     has_unwanted_subs,
     is_adult_release,
@@ -948,7 +948,7 @@ def _select_candidates(
                 release_name, title, item.get("year"),
                 cfg.match.year_tolerance, cfg.match.loose_trailing_s, part_marker=True,
             ):
-                eks = part_episode_keys(release_name)
+                eks = single_season_episode_keys(release_name)
             if not eks:
                 continue
             for ek in eks:
@@ -1109,23 +1109,74 @@ def _purge_expired_candidate_cache_entries() -> list[dict]:
     return [_CANDIDATE_CACHE.pop(k) for k in expired]
 
 
+async def _delete_instance_if_unreferenced(ad: AirDCPP, iid: int) -> None:
+    """A season listing (list_season_candidates) caches ONE search instance
+    under every episode key it covers — only delete the instance once no
+    remaining cache entry still points at it."""
+    if any(v["iid"] == iid for v in _CANDIDATE_CACHE.values()):
+        return
+    try:
+        await ad.delete_instance(iid)
+    except Exception:
+        log.debug("delete_instance %s failed (ignored)", iid)
+
+
 async def _evict_candidate_cache(ad: AirDCPP, cache_key: str) -> None:
     entry = _CANDIDATE_CACHE.pop(cache_key, None)
     if entry is not None:
-        try:
-            await ad.delete_instance(entry["iid"])
-        except Exception:
-            log.debug("delete_instance %s failed during cache evict (ignored)", entry["iid"])
+        await _delete_instance_if_unreferenced(ad, entry["iid"])
+
+
+def _extra_search_titles(cfg: Config, item: dict) -> list[str]:
+    """match.extra_search_titles configured for this item (titles *arr doesn't
+    know it by), minus any duplicate of the canonical title."""
+    title = item["title"]
+    return [t for t in cfg.match.extra_search_titles.get(item["id"], []) if t and t != title]
 
 
 def _listing_title_variants(cfg: Config, item: dict) -> list[str]:
-    """Titles the human-triggered listing/select pair searches under —
-    canonical first, then the same ranked alt titles a poll would fall
-    back to."""
+    """Titles the human-triggered listing/select pair searches under — any
+    configured extra titles first (they're configured BECAUSE the canonical
+    title doesn't find the releases), then the canonical title, then the same
+    ranked alt titles a poll would fall back to."""
     title = item["title"]
-    return [title] + rank_alt_titles(title, list(item.get("alt_titles") or []))[
+    return _extra_search_titles(cfg, item) + [title] + rank_alt_titles(title, list(item.get("alt_titles") or []))[
         : max(0, cfg.poller.alt_title_search_limit)
     ]
+
+
+def _single_season_fallback_queries(title_query: str, key: str = "") -> list[str]:
+    """Hub queries for a single-season series whose releases carry no SxxExx.
+    For one episode `key`, "<title> E07" first — a bare-title search of a long
+    series is truncated by the hub's per-user result caps (100 results only
+    reached E10 of Vi pa Saltkrakan's 13). Then the bare title — it returns
+    "Title.Part1..." and "Title.E01..." releases alike, so a few old "Part N"
+    rips can't stop the search short of the "EN" ones (a lone "E" can't be a
+    search term: it matches nearly everything) — then "<title> Part" in case
+    the bare title's results were truncated before the Part releases."""
+    episode = [f"{title_query} E{key.upper().split('E', 1)[1]}"] if key else []
+    return episode + [title_query, f"{title_query} Part"]
+
+
+def _candidate_rows(
+    cfg: Config, groups: list[dict], item_priority: list[str], lang_priority: list[str],
+) -> list[dict]:
+    """The listing's per-release rows, scored and sorted best first. Several
+    users sharing the same release (copies differing slightly in size) collapse
+    to its best-scored copy — select_release picks the source by name anyway."""
+    rows = sorted((
+        {
+            "release_name": g["release_name"],
+            "size_bytes": g["total_size"],
+            "score": score_result(g["release_name"], g["total_size"], cfg.quality, item_priority, lang_priority),
+            "languages": sorted(release_languages(g["release_name"])),
+            "is_repack": is_repack(g["release_name"]),
+            "whole_folder": bool(g.get("dir_id")),
+        }
+        for g in groups
+    ), key=lambda c: c["score"], reverse=True)
+    seen: set[str] = set()
+    return [r for r in rows if not (r["release_name"] in seen or seen.add(r["release_name"]))]
 
 
 async def _search_listing_variant(
@@ -1143,17 +1194,20 @@ async def _search_listing_variant(
         results, item["kind"], title_variant, item, cfg, item_priority, {key}, item["id"],
     ).get(key, [])
     if not groups and item["kind"] == "tv" and _part_numbering_applies(cfg, item, {key}):
-        # Miniseries "Part N" naming — see the same fallback in poll_item.
-        try:
-            await ad.delete_instance(iid)
-        except Exception:
-            log.debug("delete_instance %s failed (ignored)", iid)
-        iid, results = await ad.search_release_candidates(f"{title_query} Part", wait)
-        if iid is None:
-            return None, 0, []
-        groups = _select_candidates(
-            results, item["kind"], title_variant, item, cfg, item_priority, {key}, item["id"],
-        ).get(key, [])
+        # Miniseries "Part N" / bare "EN" naming — see the same fallback in poll_item.
+        for fallback in _single_season_fallback_queries(title_query, key):
+            try:
+                await ad.delete_instance(iid)
+            except Exception:
+                log.debug("delete_instance %s failed (ignored)", iid)
+            iid, results = await ad.search_release_candidates(fallback, wait)
+            if iid is None:
+                return None, 0, []
+            groups = _select_candidates(
+                results, item["kind"], title_variant, item, cfg, item_priority, {key}, item["id"],
+            ).get(key, [])
+            if groups:
+                break
     return iid, len(results), groups
 
 
@@ -1180,10 +1234,7 @@ async def list_release_candidates(
     cache_key = _candidate_cache_key(item_id, key)
 
     for stale in _purge_expired_candidate_cache_entries():
-        try:
-            await ad.delete_instance(stale["iid"])
-        except Exception:
-            log.debug("delete_instance %s failed during TTL purge (ignored)", stale["iid"])
+        await _delete_instance_if_unreferenced(ad, stale["iid"])
     await _evict_candidate_cache(ad, cache_key)
 
     item_priority = item.get("quality_priority") or []
@@ -1217,20 +1268,96 @@ async def list_release_candidates(
     _CANDIDATE_CACHE[cache_key] = {
         "iid": iid, "by_name": {g["release_name"]: g for g in groups}, "created_at": time.time(),
     }
-    out = [
-        {
-            "release_name": g["release_name"],
-            "size_bytes": g["total_size"],
-            "score": score_result(g["release_name"], g["total_size"], cfg.quality, item_priority, lang_priority),
-            "languages": sorted(release_languages(g["release_name"])),
-            "is_repack": is_repack(g["release_name"]),
-            "whole_folder": bool(g.get("dir_id")),
-        }
-        for g in groups
-    ]
-    out.sort(key=lambda c: c["score"], reverse=True)
+    out = _candidate_rows(cfg, groups, item_priority, lang_priority)
     log.info("candidates %s key=%s: %d hub result(s) -> %d passing candidate(s)",
              item_id, key, n_results, len(out))
+    return out
+
+
+async def _search_season_variant(
+    cfg: Config, ad: AirDCPP, item: dict, season: int, keys: set[str], title_variant: str,
+    wait: float, item_priority: list[str],
+) -> tuple[Optional[int], int, dict[str, list[dict]]]:
+    """One hub search for a whole season ("<title> S05E" — a substring term,
+    so it matches every episode's release folder at once) + the normal
+    guards. Returns (instance_id, raw result count, passing groups by key)."""
+    title_query = loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
+    iid, results = await ad.search_release_candidates(f"{title_query} S{season:02d}E", wait)
+    if iid is None:
+        return None, 0, {}
+    by_key = _select_candidates(results, "tv", title_variant, item, cfg, item_priority, keys, item["id"])
+    if not by_key and _part_numbering_applies(cfg, item, keys):
+        # Miniseries "Part N" / bare "EN" naming — see the same fallback in poll_item.
+        for fallback in _single_season_fallback_queries(title_query):
+            try:
+                await ad.delete_instance(iid)
+            except Exception:
+                log.debug("delete_instance %s failed (ignored)", iid)
+            iid, results = await ad.search_release_candidates(fallback, wait)
+            if iid is None:
+                return None, 0, {}
+            by_key = _select_candidates(results, "tv", title_variant, item, cfg, item_priority, keys, item["id"])
+            if by_key:
+                break
+    return iid, len(results), by_key
+
+
+async def list_season_candidates(
+    cfg: Config, ad: AirDCPP, item: dict, season: int, episode_keys: list[str], wait: float = 8.0,
+) -> dict[str, list[dict]]:
+    """Season-wide form of list_release_candidates — media-audit's "Replace
+    season" panel. ONE hub search per title variant covers every episode of
+    the season, instead of one search per episode. Returns {episode key ->
+    candidates, scored and sorted best first}; a key with nothing passing is
+    simply absent. Queues nothing.
+
+    The one search instance is cached under EVERY episode key it covers, so
+    each episode's select_release can still queue straight from it with no
+    re-search; the instance is only deleted once the last of those entries
+    is spent or expires (_delete_instance_if_unreferenced)."""
+    item_id = item["id"]
+    keys = set(episode_keys)
+
+    for stale in _purge_expired_candidate_cache_entries():
+        await _delete_instance_if_unreferenced(ad, stale["iid"])
+    for key in keys:
+        await _evict_candidate_cache(ad, _candidate_cache_key(item_id, key))
+
+    item_priority = item.get("quality_priority") or []
+    lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
+
+    # Same language-aware title fallback as list_release_candidates.
+    iid, by_key, n_results = None, {}, 0
+    for title_variant in _listing_title_variants(cfg, item):
+        v_iid, v_n, v_by_key = await _search_season_variant(
+            cfg, ad, item, season, keys, title_variant, wait, item_priority,
+        )
+        if v_iid is None:
+            continue
+        n_results += v_n
+        names = [g["release_name"] for groups in v_by_key.values() for g in groups]
+        preferred = bool(names) and has_preferred_language(names, lang_priority)
+        if v_by_key and (iid is None or preferred):
+            if iid is not None:
+                await ad.delete_instance(iid)
+            iid, by_key = v_iid, v_by_key
+        else:
+            await ad.delete_instance(v_iid)
+        if preferred:
+            break
+    if iid is None:
+        log.info("candidates %s season=%s: %d hub result(s) -> 0 passing candidate(s)", item_id, season, n_results)
+        return {}
+
+    now = time.time()
+    out: dict[str, list[dict]] = {}
+    for key, groups in by_key.items():
+        _CANDIDATE_CACHE[_candidate_cache_key(item_id, key)] = {
+            "iid": iid, "by_name": {g["release_name"]: g for g in groups}, "created_at": now,
+        }
+        out[key] = _candidate_rows(cfg, groups, item_priority, lang_priority)
+    log.info("candidates %s season=%s: %d hub result(s) -> candidates for %d/%d episode(s)",
+             item_id, season, n_results, len(out), len(keys))
     return out
 
 
@@ -1300,10 +1427,7 @@ async def select_release(
             )
         finally:
             _CANDIDATE_CACHE.pop(cache_key, None)
-            try:
-                await ad.delete_instance(iid)
-            except Exception:
-                log.debug("delete_instance %s failed (ignored)", iid)
+            await _delete_instance_if_unreferenced(ad, iid)
         log.warning("select %s: queued=%s release=%r key=%s (from the cached listing, no re-search)",
                     item_id, bool(queued), release_name, key)
         return queued
@@ -1623,7 +1747,9 @@ async def _poll_item(
         # miss) — same rationale as the movie branch below: a scene release's wording
         # can diverge from TMDB's canonical title, including dropping a subtitle tail
         # entirely.
-        ep_title_variants = [title]
+        # Configured extra titles go first: they exist because the canonical
+        # title doesn't find this item's releases.
+        ep_title_variants = _extra_search_titles(cfg, item) + [title]
         ep_short_title = title_before_subtitle_separator(title)
         if ep_short_title:
             ep_title_variants.append(ep_short_title)
@@ -1634,7 +1760,7 @@ async def _poll_item(
         for idx, ek in enumerate(batch):
             exclude = await state.get_failed_releases(item_id, ek)
             for vi, title_variant in enumerate(ep_title_variants):
-                ep_query = query if vi == 0 else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
+                ep_query = query if title_variant == title else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
                 ep_iid, results = await ad.search_release_candidates(
                     f"{ep_query} {ek}", cfg.poller.tv_search_settle_seconds,
                 )
@@ -1649,7 +1775,7 @@ async def _poll_item(
                     )
                     if candidates_by_key:
                         found_keys.add(ek)
-                        if vi > 0:
+                        if title_variant != title:
                             log.info("poll %s: %s matched via alternate title %r",
                                      item_id, ek, title_variant)
                         queued += await _queue_candidates(
@@ -1671,35 +1797,45 @@ async def _poll_item(
                 await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
         part_keys = set(batch) - found_keys
         if part_keys and _part_numbering_applies(cfg, item, needed_keys):
-            # Miniseries named "Title.Part1..." never match an SxxExx query —
-            # one "<title> Part" search covers every remaining episode.
-            await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
-            part_iid, results = await ad.search_release_candidates(
-                f"{query} Part", cfg.poller.tv_search_settle_seconds,
-            )
-            if part_iid is not None:
-                try:
-                    total_results += len(results)
-                    exclude = set()
-                    for k in part_keys:
-                        exclude |= await state.get_failed_releases(item_id, k)
-                    candidates_by_key = _select_candidates(
-                        results, kind, title, item, cfg, item_priority, part_keys, item_id,
-                        exclude_releases=exclude,
+            # Miniseries named "Title.Part1..." / "Title.E01..." never match an
+            # SxxExx query — one bare "<title>" search (then "<title> Part")
+            # covers every remaining episode. Under the canonical title
+            # and any configured extra titles (not the TMDB alts: that would
+            # multiply searches on every poll of every miniseries).
+            for fb_title in _extra_search_titles(cfg, item) + [title]:
+                fb_query = query if fb_title == title else loosen_hyphens_for_search(sanitize_for_dc_search(fb_title))
+                for fallback in _single_season_fallback_queries(fb_query):
+                    if not part_keys:
+                        break
+                    await asyncio.sleep(cfg.poller.tv_search_gap_seconds)
+                    part_iid, results = await ad.search_release_candidates(
+                        fallback, cfg.poller.tv_search_settle_seconds,
                     )
-                    if candidates_by_key:
-                        log.info("poll %s: %s matched via \"Part N\" naming",
-                                 item_id, ",".join(sorted(candidates_by_key)))
-                        queued += await _queue_candidates(
-                            ad, state, cfg, part_iid, kind, item_id,
-                            candidates_by_key, in_queue_keys, target_base_smb, item_priority,
-                            lang_priority,
-                        )
-                finally:
+                    if part_iid is None:
+                        continue
                     try:
-                        await ad.delete_instance(part_iid)
-                    except Exception:
-                        log.debug("delete_instance %s failed (ignored)", part_iid)
+                        total_results += len(results)
+                        exclude = set()
+                        for k in part_keys:
+                            exclude |= await state.get_failed_releases(item_id, k)
+                        candidates_by_key = _select_candidates(
+                            results, kind, fb_title, item, cfg, item_priority, part_keys, item_id,
+                            exclude_releases=exclude,
+                        )
+                        if candidates_by_key:
+                            log.info("poll %s: %s matched via season-less naming (%r)",
+                                     item_id, ",".join(sorted(candidates_by_key)), fallback)
+                            part_keys -= set(candidates_by_key)
+                            queued += await _queue_candidates(
+                                ad, state, cfg, part_iid, kind, item_id,
+                                candidates_by_key, in_queue_keys, target_base_smb, item_priority,
+                                lang_priority,
+                            )
+                    finally:
+                        try:
+                            await ad.delete_instance(part_iid)
+                        except Exception:
+                            log.debug("delete_instance %s failed (ignored)", part_iid)
         log.info("poll %s: searched %d episode(s), %d hub result(s), queued %d",
                  item_id, len(batch), total_results, queued)
         # Fruitless-drain backoff: a 'draining' item that keeps searching and
@@ -1729,7 +1865,7 @@ async def _poll_item(
         # can never match — then up to alt_title_search_limit of TMDB's alternate
         # titles as further fallbacks, since scene releases sometimes follow a
         # regional/translated title's wording instead of the canonical one.
-        title_variants = [title]
+        title_variants = _extra_search_titles(cfg, item) + [title]
         short_title = title_before_subtitle_separator(title)
         if short_title:
             title_variants.append(short_title)
@@ -1749,7 +1885,7 @@ async def _poll_item(
         # episode, keyed on the lone "movie" key.
         movie_exclude = await state.get_failed_releases(item_id, "movie")
         for vi, title_variant in enumerate(title_variants):
-            variant_query = query if vi == 0 else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
+            variant_query = query if title_variant == title else loosen_hyphens_for_search(sanitize_for_dc_search(title_variant))
             iid, results = await ad.search_release_candidates(variant_query, 8.0)
             if iid is None:
                 continue
@@ -1759,7 +1895,7 @@ async def _poll_item(
                 log.info(
                     "poll %s: %d hub result(s) for %r%s",
                     item_id, len(results), variant_query,
-                    "" if vi == 0 else " (alt title fallback)",
+                    "" if title_variant == title else " (alt title fallback)",
                 )
                 variant_candidates = _select_candidates(
                     results, kind, title_variant, item, cfg, item_priority, needed_keys, item_id,

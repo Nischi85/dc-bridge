@@ -145,7 +145,12 @@ def episode_keys_from_name(name: str) -> list[str]:
 # "Part N" naming some miniseries releases use instead of SxxExx
 # ("Lonesome.Dove.1989.Part1.1080p..."). A range ("Part.1-4") is a pack, not a part.
 _PART_RE = re.compile(r"\bpart[. _]?(\d{1,2})(?!\d|-\d)", re.I)
-_PART_TOKEN_RE = re.compile(r"part\d{0,2}")
+# Single-season episode-marker token: "Part"/"PartN", or a bare "E01" (some
+# miniseries/old series are released "Title.E01..." with no season number).
+_PART_TOKEN_RE = re.compile(r"part\d{0,2}|e\d{1,3}")
+# Bare "E01" episode marker with no season ("Vi.Pa.Saltkrakan.E01.SWEDiSH...").
+# \b on the left keeps it from matching inside "S01E01".
+_BARE_EPISODE_RE = re.compile(r"\bE(\d{1,3})\b", re.I)
 
 
 def part_episode_keys(name: str) -> list[str]:
@@ -153,6 +158,18 @@ def part_episode_keys(name: str) -> list[str]:
     a single-season series (see is_single_season)."""
     m = _PART_RE.search(name)
     return [f"S01E{int(m.group(1)):02d}"] if m else []
+
+
+def bare_episode_keys(name: str) -> list[str]:
+    """['S01E07'] for a bare "E07" release name (no season number), [] otherwise.
+    Only meaningful for a single-season series (see is_single_season)."""
+    return [f"S01E{int(m.group(1)):02d}" for m in _BARE_EPISODE_RE.finditer(name)]
+
+
+def single_season_episode_keys(name: str) -> list[str]:
+    """Episode keys from the season-less markers a single-season series may be
+    released under: "Part N", else bare "EN"."""
+    return part_episode_keys(name) or bare_episode_keys(name)
 
 
 def is_single_season(episode_keys) -> bool:
@@ -521,7 +538,8 @@ def tv_release_extra_words_ok(
     IS part of the franchise name (e.g. 'American.Horror.Story.1984.S09E01')
     still matches via its alternate title, whose tokens include the year.
     Permissive when the release has no SxxExx token or the title is empty.
-    part_marker=True uses a "Part"/"PartN" token as the marker instead of SxxExx."""
+    part_marker=True uses a "Part"/"PartN" or bare "E01" token as the marker
+    instead of SxxExx."""
     want = _title_tokens(title)
     if not want:
         return True

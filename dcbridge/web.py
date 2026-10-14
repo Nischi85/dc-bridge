@@ -43,6 +43,7 @@ from dcbridge.poller import (
     handle_radarr_event,
     handle_sonarr_event,
     list_release_candidates,
+    list_season_candidates,
     poll_item,
     poller_loop,
     react_to_jellyseerr,
@@ -261,14 +262,28 @@ def make_app(cfg: Config) -> FastAPI:
         return None
 
     @app.get("/candidates/{item_id:path}")
-    async def list_candidates(item_id: str, episode: Optional[str] = None, wait: float = 8.0):
+    async def list_candidates(
+        item_id: str, episode: Optional[str] = None, wait: float = 8.0,
+        season: Optional[int] = None, episodes: Optional[str] = None,
+    ):
         """Human-triggered only — media-audit's "Check other releases"
-        button. See poller.list_release_candidates. `episode` (an SxxExx
-        key) is required for a TV item, one episode at a time."""
+        button. See poller.list_release_candidates. A TV item needs either
+        `episode` (one SxxExx key) or `season` + `episodes` (a comma-separated
+        list of that season's SxxExx keys) — the latter is ONE hub search for
+        the whole season (poller.list_season_candidates), returned as
+        `by_episode`."""
         item = await _fetch_item_for_candidates(item_id)
         if not item:
             raise HTTPException(404, f"no such {item_id!r} in Radarr/Sonarr (or *arr unreachable)")
         kind = item["kind"]
+        if kind == "tv" and season is not None:
+            keys = [k.strip().upper() for k in (episodes or "").split(",") if k.strip()]
+            if not keys:
+                raise HTTPException(400, "episodes query param is required with season")
+            ad = app.state.airdcpp
+            await ad.ensure_auth()
+            by_episode = await list_season_candidates(cfg, ad, item, season, keys, wait=wait)
+            return {"item_id": item_id, "kind": kind, "season": season, "by_episode": by_episode}
         if kind == "tv" and not episode:
             raise HTTPException(400, "episode query param is required for a TV item")
         key = episode if kind == "tv" else "movie"

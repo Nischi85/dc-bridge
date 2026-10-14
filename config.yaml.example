@@ -283,8 +283,9 @@ match:
   # releases land around the digital date; raise this if they tend to appear later.
   # 0 = search from the release date. Fractions allowed (0.5 = 12h).
   movie_release_offset_days: 0
-  # Single-season series (miniseries): treat a "Part N" release
-  # ("Title.1989.Part1.1080p...") as S01E0N; searches "<title> Part" when SxxExx finds nothing.
+  # Single-season series (miniseries): treat a "Part N" or bare "EN" release
+  # ("Title.1989.Part1.1080p...", "Title.E01.SWEDiSH...") as S01E0N; searches
+  # the bare title (then "<title> Part") when SxxExx finds nothing.
   miniseries_part_numbering: true
   # Per-item required release tag(s), keyed by the bridge's item id (as shown
   # in its log lines, e.g. "sonarr:845"). A release for that item must carry
@@ -296,3 +297,9 @@ match:
   require_release_tags: {}
   # require_release_tags:
   #   "sonarr:845": ["SWEDiSH"]   # Wallander (2005, Swedish) vs. the BBC remake
+  # Per-item extra hub search titles, keyed like require_release_tags — for an
+  # item released under a title Sonarr/Radarr don't list (not even among TMDB's
+  # alternate titles). Tried first, before the canonical title.
+  extra_search_titles: {}
+  # extra_search_titles:
+  #   "sonarr:646": ["Vi på Saltkråkan"]   # Life on Seacrow Island
