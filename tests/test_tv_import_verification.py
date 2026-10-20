@@ -59,8 +59,12 @@ def _item(target_dir_fs="/nonexistent/Outer Banks"):
     return {"id": "sonarr:663", "title": "Outer Banks", "target_dir_fs": target_dir_fs}
 
 
-def _run(cfg, state, item, now_ts, sonarr_have, monkeypatch):
-    calls = {"rescan": 0}
+def _run(cfg, state, item, now_ts, sonarr_have, monkeypatch, manual_imported=0):
+    calls = {"rescan": 0, "manual": []}
+
+    async def fake_manual_import(cfg_, item_id, releases):
+        calls["manual"].append(list(releases))
+        return manual_imported
 
     async def fake_sonarr_imported_episode_keys(cfg_, item_id):
         return sonarr_have
@@ -70,6 +74,7 @@ def _run(cfg, state, item, now_ts, sonarr_have, monkeypatch):
 
     monkeypatch.setattr(poller, "sonarr_imported_episode_keys", fake_sonarr_imported_episode_keys)
     monkeypatch.setattr(poller, "trigger_arr_rescan", fake_trigger_arr_rescan)
+    monkeypatch.setattr(poller, "sonarr_manual_import_releases", fake_manual_import)
     calls["invalidated"] = asyncio.run(poller.verify_tv_imports(cfg, state, item, now_ts))
     return calls
 
@@ -217,3 +222,20 @@ def test_sfv_verifies_complete_does_not_drop_marker(monkeypatch, tmp_path):
     now_ts = 1000 + 1800 + 1
     calls = _run(cfg, state, _item(str(tmp_path)), now_ts=now_ts, sonarr_have=set(), monkeypatch=monkeypatch)
     assert state.cleared == [] and calls["rescan"] == 1
+
+
+def test_stuck_episode_tries_manual_import_before_rescan(monkeypatch):
+    cfg = _cfg(interval_seconds=900)
+    state = FakeState([("S05E04", "Outer.Banks.S05E04-CAKES", 1000)])
+    calls = _run(cfg, state, _item(), now_ts=2801, sonarr_have=set(), monkeypatch=monkeypatch)
+    assert calls["manual"] == [[("S05E04", "Outer.Banks.S05E04-CAKES")]]
+    assert calls["rescan"] == 1  # manual import covered nothing -> rescan as before
+
+
+def test_manual_import_covering_every_episode_skips_the_rescan(monkeypatch):
+    cfg = _cfg(interval_seconds=900)
+    state = FakeState([("S05E04", "Outer.Banks.S05E04-CAKES", 1000)])
+    calls = _run(cfg, state, _item(), now_ts=2801, sonarr_have=set(),
+                 monkeypatch=monkeypatch, manual_imported=1)
+    assert calls["rescan"] == 0
+    assert "S05E04:verified" not in state._verified  # confirmed on a later sweep

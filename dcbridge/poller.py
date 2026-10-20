@@ -83,6 +83,7 @@ from dcbridge.arr import (
     resync_one_movie,
     resync_one_series,
     sonarr_imported_episode_keys,
+    sonarr_manual_import_releases,
     sonarr_monitored_missing_keys,
     trigger_arr_rescan,
 )
@@ -751,7 +752,8 @@ async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) 
     except OSError:
         root_ok = False
 
-    newly_verified = still_missing = invalidated = 0
+    newly_verified = invalidated = 0
+    stuck: list[tuple[str, str]] = []
     for key, rel, _qat in due:
         if key in have:
             await state.mark_completed(item_id, f"{key}:verified", None, "(verified)")
@@ -774,16 +776,20 @@ async def verify_tv_imports(cfg: Config, state: State, item: dict, now_ts: int) 
                 item_id, key, rel,
             )
         else:
-            still_missing += 1
+            stuck.append((key, rel))
     if newly_verified:
         log.info("poll %s: confirmed %d episode(s) actually imported by Sonarr", item_id, newly_verified)
-    if still_missing:
-        log.warning(
-            "poll %s: %d episode(s) completed by the bridge %.0fmin+ ago still not "
-            "imported by Sonarr — retrying targeted rescan",
-            item_id, still_missing, grace / 60,
-        )
-        await trigger_arr_rescan(cfg, item_id)
+    if stuck:
+        # A rescan only reads file names; an obfuscated one ("afo-...-0305-...mkv")
+        # never parses, so import those by their release folder instead.
+        imported = await sonarr_manual_import_releases(cfg, item_id, stuck)
+        if imported < len(stuck):
+            log.warning(
+                "poll %s: %d episode(s) completed by the bridge %.0fmin+ ago still not "
+                "imported by Sonarr — retrying targeted rescan",
+                item_id, len(stuck) - imported, grace / 60,
+            )
+            await trigger_arr_rescan(cfg, item_id)
     return invalidated
 
 

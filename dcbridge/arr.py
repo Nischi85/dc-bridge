@@ -18,6 +18,7 @@ from dcbridge.helpers import (
     _truncate,
     _utc_iso,
     folder_name_is_scene_safe,
+    season_of_episode_key,
     title_to_folder_name,
 )
 from dcbridge.util import (
@@ -901,6 +902,104 @@ async def sonarr_imported_episode_keys(cfg: Config, item_id: str) -> Optional[se
     except Exception as e:
         log.warning("sonarr_imported_episode_keys %s failed: %s", item_id, e)
         return None
+
+
+async def sonarr_manual_import_releases(
+    cfg: Config, item_id: str, releases: list[tuple[str, str]]
+) -> int:
+    """Import completed grabs whose video file name Sonarr can't parse, telling
+    it the episode explicitly. A RescanSeries only reads the file name, so an
+    obfuscated one ("afo-myadventureswithsuperman-0305-720-web.mkv", seen
+    2026-10-18) never imports however often it fires — but the release folder
+    the bridge grabbed into names the episode, quality and group. For each
+    (SxxExx key, release folder) this asks Sonarr's manual-import scan about
+    the folder and imports its one video file as that episode, with quality,
+    languages and group parsed from the folder name.
+
+    Deliberately narrow: skipped unless the folder holds exactly one non-sample
+    video file that Sonarr raises no rejection for and hasn't matched to a
+    different episode. Returns the number of files submitted (the command runs
+    asynchronously; the next verify_tv_imports sweep confirms it)."""
+    prefix, _, sid = item_id.partition(":")
+    if prefix != "sonarr" or not sid.isdigit() or not cfg.sonarr.api_key or not releases:
+        return 0
+    base = cfg.sonarr.url.rstrip("/")
+    h = {"X-Api-Key": cfg.sonarr.api_key}
+    files: list[dict] = []
+    try:
+        async with http_session() as http:
+            sr = await http.get(f"{base}/api/v3/series/{sid}", headers=h)
+            er = await http.get(f"{base}/api/v3/episode", params={"seriesId": sid}, headers=h)
+            if sr.status_code != 200 or er.status_code != 200:
+                return 0
+            series_path = (sr.json().get("path") or "").rstrip("/")
+            ep_ids = {
+                f"S{int(e.get('seasonNumber', 0)):02d}E{int(e.get('episodeNumber', 0)):02d}": e.get("id")
+                for e in er.json()
+            }
+            for key, rel in releases:
+                eid, season = ep_ids.get(key), season_of_episode_key(key)
+                if not (series_path and eid and season is not None):
+                    continue
+                folder = f"{series_path}/Season.{season}/{rel}"
+                mr = await http.get(
+                    f"{base}/api/v3/manualimport",
+                    params={"folder": folder, "seriesId": sid, "filterExistingFiles": "true"},
+                    headers=h,
+                )
+                if mr.status_code != 200:
+                    continue
+                # Inside a series folder Sonarr scans the whole series and
+                # ignores the sub-folder asked for — keep only this release.
+                prefix_l = folder.lower() + "/"
+                rows = [
+                    r for r in mr.json()
+                    if (r.get("path") or "").lower().startswith(prefix_l)
+                    and "/sample/" not in (r.get("path") or "").lower()
+                    and not Path(r.get("path") or "").stem.lower().endswith("sample")
+                ]
+                if len(rows) != 1:
+                    log.info("manual import %s %s: %d video file(s) in %r — skipping",
+                             item_id, key, len(rows), rel)
+                    continue
+                row = rows[0]
+                matched = {e.get("id") for e in row.get("episodes") or []}
+                if row.get("rejections") or (matched and matched != {eid}):
+                    log.info("manual import %s %s: Sonarr rejects/mismatches %r — skipping",
+                             item_id, key, row.get("path"))
+                    continue
+                pr = await http.get(f"{base}/api/v3/parse", params={"title": rel}, headers=h)
+                info = (pr.json() or {}).get("parsedEpisodeInfo") if pr.status_code == 200 else None
+                if not info or not info.get("quality"):
+                    continue
+                files.append({
+                    "path": row["path"],
+                    "folderName": rel,
+                    "seriesId": int(sid),
+                    "episodeIds": [eid],
+                    "quality": info["quality"],
+                    "languages": [
+                        lang for lang in (info.get("languages") or [])
+                        if lang.get("name") != "Unknown"
+                    ] or row.get("languages") or info.get("languages") or [],
+                    "releaseGroup": info.get("releaseGroup") or "",
+                })
+            if not files:
+                return 0
+            cr = await http.post(
+                f"{base}/api/v3/command",
+                headers={**h, "Content-Type": "application/json"},
+                json={"name": "ManualImport", "files": files, "importMode": "auto"},
+            )
+        if cr.status_code not in (200, 201):
+            log.warning("ManualImport for %s -> %s", item_id, cr.status_code)
+            return 0
+        log.info("poll %s: manual-imported %d unparseable file(s) by release folder: %s",
+                 item_id, len(files), ", ".join(f["folderName"] for f in files))
+        return len(files)
+    except Exception as e:
+        log.warning("sonarr_manual_import_releases %s failed: %s", item_id, e)
+        return 0
 
 
 async def arr_has_imported(
