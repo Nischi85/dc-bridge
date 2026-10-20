@@ -67,7 +67,11 @@ because it's about matching *correctly*, not taste.
   entry), and `extra_search_titles` (per-item extra hub search titles, same
   keying — for something released under a title *arr doesn't know, e.g.
   `"sonarr:646": ["Vi på Saltkråkan"]` for *Life on Seacrow Island*; tried
-  before the canonical title). `miniseries_part_numbering` (default on)
+  before the canonical title; automatic polls use only these. When you list
+  other releases or replace a season, a TV series' library folder name
+  (`I.Mumindalen` for *Moomin*) is searched as well, unless its words match a
+  title already known — so a folder named after the release usually needs
+  no entry). `miniseries_part_numbering` (default on)
   maps a single-season series' "Part N" and bare "EN" releases
   ("Title.E01.SWEDiSH...") to S01E0N.
 

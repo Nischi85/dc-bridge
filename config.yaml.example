@@ -299,7 +299,10 @@ match:
   #   "sonarr:845": ["SWEDiSH"]   # Wallander (2005, Swedish) vs. the BBC remake
   # Per-item extra hub search titles, keyed like require_release_tags — for an
   # item released under a title Sonarr/Radarr don't list (not even among TMDB's
-  # alternate titles). Tried first, before the canonical title.
+  # alternate titles). Tried first, before the canonical title. Candidate
+  # listings ("Check other releases", "Replace season") also search a TV
+  # series' folder name automatically, so add an entry here only when the
+  # folder isn't named after the release title, or for automatic polls.
   extra_search_titles: {}
   # extra_search_titles:
   #   "sonarr:646": ["Vi på Saltkråkan"]   # Life on Seacrow Island
