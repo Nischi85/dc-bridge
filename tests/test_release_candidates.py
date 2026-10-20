@@ -47,7 +47,7 @@ def _movie_item(target_dir_fs="/mnt/zzd/share/fin/Movies"):
             "target_dir_fs": target_dir_fs, "quality_priority": []}
 
 
-def _tv_item(target_dir_fs="/mnt/zzd/share/fin/TV.Series"):
+def _tv_item(target_dir_fs="/mnt/zzd/share/fin/TV.Series/Some.Show"):
     return {"id": "sonarr:9", "kind": "tv", "title": "Some Show", "year": 2020,
             "target_dir_fs": target_dir_fs, "quality_priority": []}
 
@@ -382,9 +382,9 @@ def test_season_listing_is_one_search_grouped_by_episode():
     ad = FakeAd(_season_results())
     out = asyncio.run(poller.list_season_candidates(
         _cfg(), ad, _tv_item(), 1, ["S01E01", "S01E02", "S01E03"], wait=0))
-    assert len(ad.hub_searches) == 1
-    assert ad.hub_searches[0].endswith("S01E")
-    assert ad.hub_search_file_types == ["directory"]
+    # one season search + one "S01E0" follow-up for the S01E03 it missed
+    assert ad.hub_searches == ["Some Show S01E", "Some Show S01E0"]
+    assert ad.hub_search_file_types == ["directory", "directory"]
     assert sorted(out) == ["S01E01", "S01E02"]  # S01E03 had nothing, S01E07 wasn't asked for
     assert [c["release_name"] for c in out["S01E01"]] == [
         "Some.Show.S01E01.1080p.WEB.x264-GROUP", "Some.Show.S01E01.720p.HDTV.x264-OTHER",

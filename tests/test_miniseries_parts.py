@@ -14,7 +14,7 @@ YEARS = {"S01E01": 1989, "S01E02": 1989, "S01E03": 1989, "S01E04": 1989}
 
 def _item(years=YEARS):
     return {"id": "sonarr:848", "kind": "tv", "title": "Lonesome Dove", "year": 1989,
-            "target_dir_fs": "/mnt/zzd/share/fin/TV.Series", "quality_priority": [],
+            "target_dir_fs": "/mnt/zzd/share/fin/TV.Series/Lonesome.Dove", "quality_priority": [],
             "alt_titles": [], "episode_air_years": years}
 
 
@@ -89,7 +89,7 @@ SEACROW = {f"S01E{n:02d}": 1964 for n in range(1, 14)}
 
 def _seacrow_item(years=SEACROW):
     return {"id": "sonarr:646", "kind": "tv", "title": "Life on Seacrow Island", "year": 1964,
-            "target_dir_fs": "/mnt/zzd/share/fin/TV.For.Children/Series", "quality_priority": [],
+            "target_dir_fs": "/mnt/zzd/share/fin/TV.For.Children/Series/Vi.Pa.Saltkrakan", "quality_priority": [],
             "alt_titles": ["Ferien auf der Kraeheninsel"], "episode_air_years": years}
 
 
@@ -152,9 +152,9 @@ def test_listing_title_variants_put_extra_titles_first():
     assert poller._listing_title_variants(_seacrow_cfg(), _seacrow_item()) == [
         "Vi på Saltkråkan", "Life on Seacrow Island", "Ferien auf der Kraeheninsel",
     ]
-    # No entry for the item -> unchanged.
+    # No config entry -> the folder title ("…/Vi.Pa.Saltkrakan") stands in for it.
     assert poller._listing_title_variants(_cfg(), _seacrow_item()) == [
-        "Life on Seacrow Island", "Ferien auf der Kraeheninsel",
+        "Vi Pa Saltkrakan", "Life on Seacrow Island", "Ferien auf der Kraeheninsel",
     ]
 
 
@@ -209,4 +209,71 @@ def test_season_listing_falls_back_to_a_bare_title_search():
         "S01E02": ["Vi.Pa.Saltkrakan.E02.SWEDiSH.720p.BluRay.x264-CLASSiC"],
     }
     assert "Vi pa Saltkrakan S01E" in ad.hub_searches
-    assert ad.hub_searches[-1] == "Vi pa Saltkrakan"
+    assert "Vi pa Saltkrakan" in ad.hub_searches
+
+
+# --- the series folder's own title as a listing search title ----------------
+
+def _moomin_item(folder="I.Mumindalen", title="Moomin"):
+    return {"id": "sonarr:626", "kind": "tv", "title": title, "year": 1990,
+            "target_dir_fs": f"/mnt/zzd/share/fin/TV.For.Children/Series/{folder}", "quality_priority": [],
+            "alt_titles": ["Mumins 1990"], "episode_air_years": {"S01E01": 1990, "S02E01": 1991}}
+
+
+def test_folder_title_is_searched_before_the_canonical_title():
+    assert poller._listing_title_variants(_cfg(), _moomin_item()) == ["I Mumindalen", "Moomin", "Mumins 1990"]
+
+
+def test_folder_title_that_only_differs_in_noise_is_not_added():
+    for folder, title in [("Paradise", "Paradise (2025)"), ("Superman.And.Lois", "Superman & Lois"),
+                          ("Shameless", "Shameless (US)"), ("Moomin", "Moomin")]:
+        assert poller._listing_title_variants(_cfg(), _moomin_item(folder, title))[0] == title, folder
+
+
+def test_folder_named_after_a_whole_release_is_cut_to_its_title():
+    item = _moomin_item("Skrotnisse.Och.Hans.Vanner.1985.SWEDiSH.PROPER.DVDRip.XviD-iLS", "Skrotnisse och hans vänner")
+    assert poller._folder_title(item) == "Skrotnisse Och Hans Vanner"
+    assert poller._listing_title_variants(_cfg(), item)[0] == "Skrotnisse och hans vänner"
+
+
+def test_folder_title_is_not_used_for_movies_or_polls():
+    movie = dict(_moomin_item(), kind="movie", id="radarr:1")
+    assert poller._folder_title(movie) == ""
+    assert poller._extra_search_titles(_cfg(), _moomin_item()) == []
+
+
+def test_season_listing_finds_releases_under_the_folder_title():
+    names = ["I.Mumindalen.S01E01.SWE.ENG.720p.WEB.H264-X", "Moomin.Valley.S01E01.1080p.WEB.H264-Y"]
+    ad = ExactQueryAd({"I Mumindalen S01E": [_dir_result(n, f"/S/{n}/", 7000, n) for n in names]})
+    out = asyncio.run(poller.list_season_candidates(_cfg(), ad, _moomin_item(), 1, ["S01E01"], wait=0))
+    assert [c["release_name"] for c in out["S01E01"]] == ["I.Mumindalen.S01E01.SWE.ENG.720p.WEB.H264-X"]
+    assert ad.hub_searches[0] == "I Mumindalen S01E"
+
+
+def test_season_listing_re_asks_per_block_of_ten_for_episodes_a_capped_search_missed():
+    def res(*eps):
+        return [_dir_result(f"I.Mumindalen.S01E{e:02d}.SWE.1080p.WEB.H264-X", f"/S/{e}/", 7000, f"e{e}") for e in eps]
+    ad = ExactQueryAd({
+        "I Mumindalen S01E": res(1, 2, 3),       # cut short by hub result caps
+        "I Mumindalen S01E1": res(10, 11, 12),
+        "I Mumindalen S01E2": res(21),
+    })
+    keys = [f"S01E{e:02d}" for e in (1, 2, 3, 11, 12, 21, 22)]
+    poller._CANDIDATE_CACHE.clear()  # an earlier test's sonarr:626 entries would be evicted (deleted) here
+    out = asyncio.run(poller.list_season_candidates(_cfg(), ad, _moomin_item(), 1, keys, wait=0))
+    assert sorted(out) == ["S01E01", "S01E02", "S01E03", "S01E11", "S01E12", "S01E21"]
+    assert ad.hub_searches == ["I Mumindalen S01E", "I Mumindalen S01E1", "I Mumindalen S01E2"]
+    # each block's instance is cached under its own episodes and stays open
+    cache = poller._CANDIDATE_CACHE
+    assert cache["sonarr:626:S01E11"]["iid"] == cache["sonarr:626:S01E12"]["iid"] != cache["sonarr:626:S01E01"]["iid"]
+    assert ad.instances_deleted == []
+
+
+def test_block_follow_up_for_season_less_naming_uses_bare_episode_terms():
+    def res(*eps):
+        return [_dir_result(f"Vi.Pa.Saltkrakan.E{e:02d}.SWEDiSH.1080p.BluRay.x264-CLASSiC", f"/S/{e}/", 7000, f"v{e}")
+                for e in eps]
+    ad = ExactQueryAd({"Vi Pa Saltkrakan": res(1, 2), "Vi Pa Saltkrakan E1": res(11, 12, 13)})
+    out = asyncio.run(poller.list_season_candidates(_seacrow_cfg(), ad, _seacrow_item(), 1, list(SEACROW), wait=0))
+    assert {"S01E01", "S01E11", "S01E13"} <= set(out)
+    assert "Vi pa Saltkrakan E1" in ad.hub_searches

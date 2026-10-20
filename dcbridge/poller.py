@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -44,6 +45,7 @@ from dcbridge.helpers import (
     release_starts_with_title,
     resolve_lang_priority,
     sanitize_for_dc_search,
+    to_ascii,
     score_result,
     season_of_episode_key,
     title_before_subtitle_separator,
@@ -1127,22 +1129,75 @@ async def _evict_candidate_cache(ad: AirDCPP, cache_key: str) -> None:
         await _delete_instance_if_unreferenced(ad, entry["iid"])
 
 
+# Scene tags that end the title part of a folder named after a whole release
+# ("Skrotnisse.Och.Hans.Vanner.1985.SWEDiSH.PROPER.DVDRip.XviD-iLS").
+_FOLDER_TAG_RE = re.compile(
+    r"\b(?:S\d{1,2}(?:E\d{1,3})?|SWEDiSH|NORDiC|DANiSH|NORWEGiAN|FiNNiSH|PROPER|REPACK|iNTERNAL|"
+    r"COMPLETE|DVDRip|BDRip|BluRay|WEB(?:-?DL|Rip)?|HDTV|XviD|x26[45]|H\.?26[45]|\d{3,4}p)\b.*$",
+    re.I,
+)
+_TRAILING_YEAR_RE = re.compile(r"\s*\(?\b(?:19|20)\d{2}\)?\s*$")
+
+
+def _title_words(t: str) -> str:
+    """A title reduced for comparison: ASCII words only, "&" read as "and", and a
+    trailing year or "(US)"-style country tag dropped — so "Dr. Phil"/"Dr.Phil",
+    "Superman & Lois"/"Superman.And.Lois" and "Paradise (2025)"/"Paradise"
+    count as the same title."""
+    t = to_ascii(t).lower().replace("&", " and ").replace("'", "")
+    t = re.sub(r"\s*\((?:us|uk|au|nz|ca)\)\s*$", "", t)
+    t = _TRAILING_YEAR_RE.sub("", t)
+    return " ".join(re.findall(r"[a-z0-9]+", t))
+
+
+def _folder_title(item: dict) -> str:
+    """The title a TV series' library folder spells ("…/Series/I.Mumindalen" ->
+    "I Mumindalen"), cut before any scene tags and trailing year. The folder is
+    usually named after the releases actually grabbed, which may follow a
+    title *arr doesn't list (Moomin's Swedish releases are "I.Mumindalen.
+    S01E01…", and TMDB's alt titles have only "Mumins 1990"). "" for a movie
+    (its target is the shared movies root, not a per-title folder)."""
+    if item.get("kind") != "tv" or not item.get("target_dir_fs"):
+        return ""
+    name = re.sub(r"[._]+", " ", Path(item["target_dir_fs"]).name)
+    name = _FOLDER_TAG_RE.sub("", name)
+    return _TRAILING_YEAR_RE.sub("", name).strip()
+
+
+def _dedupe_titles(titles: list[str]) -> list[str]:
+    """`titles` in order, dropping blanks and any that compare equal
+    (_title_words) to an earlier one."""
+    seen: set[str] = set()
+    out = []
+    for t in titles:
+        w = _title_words(t or "")
+        if w and w not in seen:
+            seen.add(w)
+            out.append(t)
+    return out
+
+
 def _extra_search_titles(cfg: Config, item: dict) -> list[str]:
     """match.extra_search_titles configured for this item (titles *arr doesn't
-    know it by), minus any duplicate of the canonical title."""
-    title = item["title"]
-    return [t for t in cfg.match.extra_search_titles.get(item["id"], []) if t and t != title]
+    know it by), minus any that compare equal to the canonical title."""
+    return _dedupe_titles([item["title"], *cfg.match.extra_search_titles.get(item["id"], [])])[1:]
 
 
 def _listing_title_variants(cfg: Config, item: dict) -> list[str]:
     """Titles the human-triggered listing/select pair searches under — any
     configured extra titles first (they're configured BECAUSE the canonical
-    title doesn't find the releases), then the canonical title, then the same
-    ranked alt titles a poll would fall back to."""
+    title doesn't find the releases), then the series' own folder title (same
+    reason, automatically — a person picks from the listing, so a looser
+    title is safe here; polls don't use it), then the canonical title, then
+    the same ranked alt titles a poll would fall back to."""
     title = item["title"]
-    return _extra_search_titles(cfg, item) + [title] + rank_alt_titles(title, list(item.get("alt_titles") or []))[
-        : max(0, cfg.poller.alt_title_search_limit)
-    ]
+    extras = _extra_search_titles(cfg, item)
+    rest = _dedupe_titles(
+        [title] + rank_alt_titles(title, list(item.get("alt_titles") or []))[: max(0, cfg.poller.alt_title_search_limit)]
+    )
+    known = {_title_words(t) for t in extras + rest}
+    folder = _folder_title(item)
+    return extras + ([folder] if folder and _title_words(folder) not in known else []) + rest
 
 
 def _single_season_fallback_queries(title_query: str, key: str = "") -> list[str]:
@@ -1302,6 +1357,11 @@ async def _search_season_variant(
     return iid, len(results), by_key
 
 
+# At most this many "<title> S01E1"-style follow-up searches per season
+# listing (one per block of ten episodes the first search missed).
+_SEASON_BLOCK_SEARCH_LIMIT = 5
+
+
 async def list_season_candidates(
     cfg: Config, ad: AirDCPP, item: dict, season: int, episode_keys: list[str], wait: float = 8.0,
 ) -> dict[str, list[dict]]:
@@ -1327,7 +1387,7 @@ async def list_season_candidates(
     lang_priority = resolve_lang_priority(cfg.quality, item.get("target_dir_fs"))
 
     # Same language-aware title fallback as list_release_candidates.
-    iid, by_key, n_results = None, {}, 0
+    iid, by_key, n_results, win_title = None, {}, 0, ""
     for title_variant in _listing_title_variants(cfg, item):
         v_iid, v_n, v_by_key = await _search_season_variant(
             cfg, ad, item, season, keys, title_variant, wait, item_priority,
@@ -1340,7 +1400,7 @@ async def list_season_candidates(
         if v_by_key and (iid is None or preferred):
             if iid is not None:
                 await ad.delete_instance(iid)
-            iid, by_key = v_iid, v_by_key
+            iid, by_key, win_title = v_iid, v_by_key, title_variant
         else:
             await ad.delete_instance(v_iid)
         if preferred:
@@ -1348,12 +1408,41 @@ async def list_season_candidates(
     if iid is None:
         log.info("candidates %s season=%s: %d hub result(s) -> 0 passing candidate(s)", item_id, season, n_results)
         return {}
+    iid_by_key = dict.fromkeys(by_key, iid)
+
+    # Hub users cap the results they return per search, so a long season's
+    # one search comes back cut short (Moomin: 61 results reached E10 of 29).
+    # Re-ask, under the title that worked, for each block of ten the missing
+    # episodes fall in — "<title> S01E1" matches E10-E19 as a substring term —
+    # a few searches instead of one per missing episode.
+    missing = keys - set(by_key)
+    blocks = sorted({k.upper()[:-1] for k in missing if re.fullmatch(r"S\d{2}E\d{2}", k, re.I)})
+    if by_key and missing and len(blocks) <= _SEASON_BLOCK_SEARCH_LIMIT:
+        title_query = loosen_hyphens_for_search(sanitize_for_dc_search(win_title))
+        # Season-less naming ("Title.E07…", single-season series) needs "E1",
+        # not "S01E1", to match.
+        seasonless = not any(
+            episode_keys_from_name(g["release_name"]) for groups in by_key.values() for g in groups
+        )
+        for block in blocks:
+            want = {k for k in missing if k.upper().startswith(block)}
+            term = block[block.index("E"):] if seasonless else block
+            b_iid, results = await ad.search_release_candidates(f"{title_query} {term}", wait)
+            if b_iid is None:
+                continue
+            n_results += len(results)
+            b_by_key = _select_candidates(results, "tv", win_title, item, cfg, item_priority, want, item_id)
+            if not b_by_key:
+                await ad.delete_instance(b_iid)
+                continue
+            for key, groups in b_by_key.items():
+                by_key[key], iid_by_key[key] = groups, b_iid
 
     now = time.time()
     out: dict[str, list[dict]] = {}
     for key, groups in by_key.items():
         _CANDIDATE_CACHE[_candidate_cache_key(item_id, key)] = {
-            "iid": iid, "by_name": {g["release_name"]: g for g in groups}, "created_at": now,
+            "iid": iid_by_key[key], "by_name": {g["release_name"]: g for g in groups}, "created_at": now,
         }
         out[key] = _candidate_rows(cfg, groups, item_priority, lang_priority)
     log.info("candidates %s season=%s: %d hub result(s) -> candidates for %d/%d episode(s)",
